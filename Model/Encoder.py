@@ -2,9 +2,6 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 
-import os, sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from .AutoEncoder import FCAutoencoder, Conv1DAutoencoder
 from .Block import ResidualFCBlock, Conv1dBlock
 
@@ -16,13 +13,13 @@ class ResidualFCEncoder(nn.Module):
         expand_feature:int = 128, 
         act=nn.ReLU, 
         dropout_ratio=0.3,
-        ae:Optional[Union[FCAutoencoder, Conv1DAutoencoder]]=None, # Autoencoder
+        ae:Optional[Union[FCAutoencoder]]=None, # Autoencoder
     ):
         
         super().__init__()
         self.ae = ae
         if ae is not None:
-            in_feature = ae.encoder[-1].out_features
+            in_feature = ae.out_features
         
         self.out_features = out_feature
 
@@ -34,12 +31,9 @@ class ResidualFCEncoder(nn.Module):
             dropout_ratio=dropout_ratio,
         )
 
-        if dropout_ratio != 0:
-            self.drop = nn.Dropout(dropout_ratio)
-
     def forward(self, x:torch.Tensor):
         if self.ae is not None:
-            x, _ = self.ae(x)
+           _, x, _ = self.ae(x)
         out = self.fcBlock1(x)
         return out
 
@@ -53,7 +47,7 @@ class Conv1dEncoder(nn.Module): #Out Channel 64~128
             kernel_size = 3,
             padding = 1,
             act=nn.ReLU,
-            ae:Optional[Union[FCAutoencoder, Conv1DAutoencoder]]=None
+            ae:Optional[Union[Conv1DAutoencoder]]=None
             ):
         #TODO: 필요하다면 stride, dilation, groups 추가
         
@@ -62,7 +56,7 @@ class Conv1dEncoder(nn.Module): #Out Channel 64~128
         self.out_features = out_ch
 
         if ae is not None:
-            in_ch = ae.encoder[-1].out_features
+            in_ch = ae.out_features
 
         self.net = nn.Sequential(
             Conv1dBlock(in_ch, out_ch//4, kernel_size=kernel_size, padding=padding, act=act),  # t=24
@@ -88,11 +82,13 @@ class Conv1dEncoder(nn.Module): #Out Channel 64~128
                 nn.init.zeros_(m.bias)
 
     def forward(self, x):
+        if self.ae is not None:
+            x, _, _ = self.ae(x)
         return self.net(x).squeeze(-1)  # (B, C, 1) → (B, C)
     
 
 
-class TabTransformerEncoder(nn.Module):
+class TabTransformerEncoder(nn.Module): #TODO: AE의 구조를 조금 더 유연하게 변경할 수 있도록 개선
     def __init__(self,
                   num_features:int, 
                   dim=64, 
@@ -101,18 +97,38 @@ class TabTransformerEncoder(nn.Module):
                   dropout=0.1, 
                   use_cls=False, 
                   act=nn.ReLU,
-                  ae:Optional[Union[FCAutoencoder, Conv1DAutoencoder]]=None):
+                  ae_list:Optional[list[Union[FCAutoencoder]]]=None):
         super().__init__()
         self.num_features = num_features
         self.use_cls = use_cls
 
-        self.ae = ae  # Autoencoder for feature embedding
+        self.ae = ae_list  # Autoencoder for feature embedding
         self.out_features = dim
         
-        # 각 feature를 개별적으로 임베딩 (1D → dim)
-        if ae is not None:
+        if self.ae is not None: # self.ae는 ae_list를 가리킴
+            assert len(self.ae) == num_features, \
+        f"Length of ae_list ({len(self.ae)}) must match num_features ({num_features})."
+            
+        for idx, single_ae in enumerate(self.ae):
+            in_feature_of_ae = None
+            
+            assert isinstance(single_ae, FCAutoencoder), \
+            f"Element {idx} in ae_list is not an FCAutoencoder instance."
+        # FCAutoencoder의 encoder는 nn.Sequential, 첫번째는 Linear
+            if hasattr(single_ae, 'encoder') and \
+            isinstance(single_ae.encoder, nn.Sequential) and \
+            len(single_ae.encoder) > 0 and \
+            isinstance(single_ae.encoder[0], nn.Linear):
+                in_feature_of_ae = single_ae.encoder[0].in_features
+                assert in_feature_of_ae == 1, \
+                    f"Input feature dimension for FCAutoencoder at index {idx} must be 1, got {in_feature_of_ae}."
+            else: # FCAutoencoder 구조가 예상과 다른 경우
+                raise ValueError(f"Unexpected structure for FCAutoencoder at index {idx}.")
+
+        # 각 feature를 개별적으로 임베딩 (1D → dim) 그레서 AE를 사용하는 경우, AE의 출력 차원에 맞춰 Linear 레이어를 정의
+        if self.ae is not None:
             self.feature_embeddings = nn.ModuleList([
-                nn.Linear(ae.encoder[-1].out_features, dim) for _ in range(num_features)
+                nn.Linear(self.ae[0].out_features, dim) for _ in range(num_features) 
             ])
         else:
             self.feature_embeddings = nn.ModuleList([
@@ -138,26 +154,46 @@ class TabTransformerEncoder(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
+        
+    def forward(self, x_input: torch.Tensor) -> torch.Tensor:
+        B, F_orig = x_input.shape
+        assert F_orig == self.num_features, \
+            f"Expected {self.num_features} features, got {F_orig}"
 
-    def forward(self, x):  # x: (B, F)
-        B, F = x.shape
-        assert F == self.num_features, f"Expected {self.num_features} features, got {F}"
-
-        # 각 feature별 임베딩 (독립적으로 Linear)
-        token_list = [self.feature_embeddings[i](x[:, i:i+1]) for i in range(F)]
-        x = torch.stack(token_list, dim=1)  # (B, F, D)
-
-        if self.use_cls:
-            cls_token = self.cls_token.expand(B, -1, -1)  # (B, 1, D)
-            x = torch.cat([cls_token, x], dim=1)          # (B, F+1, D)
-
-        x = self.transformer(x)                           # (B, F(+1), D)
-
-        if self.use_cls:
-            out = x[:, 0]  # (B, D)
+        processed_tokens = []
+        if self.ae is not None:
+            # AE 사용 시: 각 feature에 AE 적용 후, 해당 feature_embedding 적용
+            # 가정: self.ae는 FCAutoencoder(in_dim=1, latent_dim=AE_LATENT_DIM)
+            #       self.feature_embeddings[i]는 Linear(AE_LATENT_DIM, dim)
+            for i in range(F_orig):
+                current_feature_slice = x_input[:, i:i+1] # (B, 1)
+                latent_representation, _, _ = self.ae[i](current_feature_slice) # (B, 1) -> (B, AE_LATENT_DIM)
+                token = self.feature_embeddings[i](latent_representation) # (B, dim)
+                processed_tokens.append(token)
         else:
-            out = x.mean(dim=1)  # (B, D) — mean pooling
+            # AE 미사용 시: 각 feature에 feature_embedding 직접 적용
+            # 가정: self.feature_embeddings[i]는 Linear(1, dim)
+            for i in range(F_orig):
+                current_feature_slice = x_input[:, i:i+1] # (B, 1)
+                token = self.feature_embeddings[i](current_feature_slice) # (B, dim)
+                processed_tokens.append(token)
+
+        x = torch.stack(processed_tokens, dim=1) # (B, F_orig, dim)
+
+        if self.use_cls:
+            cls_token = self.cls_token.expand(B, -1, -1)
+            x = torch.cat([cls_token, x], dim=1)      # (B, F_orig + 1, dim)
+
+        x = self.transformer(x)                       # (B, F_orig + 1, dim)
+
+        if self.use_cls:
+            out = x[:, 0]                             # (B, dim)
+        else:
+            out = x.mean(dim=1)                       # (B, dim)
 
         out = self.norm(out)
-        out = self.output_proj(out)
+        # output_proj 레이어가 __init__에 정의되어 있다면 사용
+        if hasattr(self, 'output_proj'):
+            out = self.output_proj(out)
+            
         return out

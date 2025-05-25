@@ -82,7 +82,7 @@ class MultiHeadTask(nn.Module): #TODO: BackBone변경경
 
         self.backbone  = ResidualFCEncoder(
             in_feature=in_feature, 
-            out_feature=expand_feature, 
+            out_feature=in_feature, 
             expand_feature=expand_feature, 
             act=act, 
             dropout_ratio=dropout_ratio

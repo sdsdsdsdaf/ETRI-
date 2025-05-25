@@ -1,5 +1,5 @@
 from Model.MoE import MoE
-from Model.MutilmodalModel import MultimodalModel
+from Model.MultimodalModel import MultimodalModel
 from Model.Block import MultiHeadTask
 
 import torch
@@ -62,7 +62,7 @@ class ETRIHumanUnderstandModel(nn.Module):
         )
 
     def forward(self, sleep_date_inputs: dict, lifelog_date_inputs: dict) -> torch.Tensor:
-        # TODO: 날짜 별로 데이터 나누어 moe1, moe2로 결과 생성
+        # TODO: 날짜 별로 데이터 나누어  multimodal_features_sleep_date ,multimodal_features_life_date 다른 피처 생성
 
 
         multimodal_features_sleep_date = self.multimodal_model(sleep_date_inputs)
