@@ -108,27 +108,27 @@ class TabTransformerEncoder(nn.Module): #TODO: AE의 구조를 조금 더 유연
         if self.ae is not None: # self.ae는 ae_list를 가리킴
             assert len(self.ae) == num_features, \
         f"Length of ae_list ({len(self.ae)}) must match num_features ({num_features})."
-            
-        for idx, single_ae in enumerate(self.ae):
-            in_feature_of_ae = None
-            
-            assert isinstance(single_ae, FCAutoencoder), \
-            f"Element {idx} in ae_list is not an FCAutoencoder instance."
-        # FCAutoencoder의 encoder는 nn.Sequential, 첫번째는 Linear
-            if hasattr(single_ae, 'encoder') and \
-            isinstance(single_ae.encoder, nn.Sequential) and \
-            len(single_ae.encoder) > 0 and \
-            isinstance(single_ae.encoder[0], nn.Linear):
-                in_feature_of_ae = single_ae.encoder[0].in_features
-                assert in_feature_of_ae == 1, \
-                    f"Input feature dimension for FCAutoencoder at index {idx} must be 1, got {in_feature_of_ae}."
-            else: # FCAutoencoder 구조가 예상과 다른 경우
-                raise ValueError(f"Unexpected structure for FCAutoencoder at index {idx}.")
+                
+            for idx, single_ae in enumerate(self.ae):
+                in_feature_of_ae = None
+
+                assert isinstance(single_ae, FCAutoencoder), \
+                f"Element {idx} in ae_list is not an FCAutoencoder instance."
+            # FCAutoencoder의 encoder는 nn.Sequential, 첫번째는 Linear
+                if hasattr(single_ae, 'encoder') and \
+                isinstance(single_ae.encoder, nn.Sequential) and \
+                len(single_ae.encoder) > 0 and \
+                isinstance(single_ae.encoder[0], nn.Linear):
+                    in_feature_of_ae = single_ae.encoder[0].in_features
+                    assert in_feature_of_ae == 1, \
+                        f"Input feature dimension for FCAutoencoder at index {idx} must be 1, got {in_feature_of_ae}."
+                else: # FCAutoencoder 구조가 예상과 다른 경우
+                    raise ValueError(f"Unexpected structure for FCAutoencoder at index {idx}.")
 
         # 각 feature를 개별적으로 임베딩 (1D → dim) 그레서 AE를 사용하는 경우, AE의 출력 차원에 맞춰 Linear 레이어를 정의
         if self.ae is not None:
             self.feature_embeddings = nn.ModuleList([
-                nn.Linear(self.ae[0].out_features, dim) for _ in range(num_features) 
+                nn.Linear(self.ae[i].out_features, dim) for i in range(num_features) 
             ])
         else:
             self.feature_embeddings = nn.ModuleList([
