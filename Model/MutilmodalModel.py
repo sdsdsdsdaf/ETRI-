@@ -7,11 +7,16 @@ def get_ae(ae_dict, key):
     return ae_dict[key] if ae_dict and key in ae_dict else None
 
 class MultimodalModel(nn.Module):
-    def __init__(self, 
+    def __init__(self,
+                 in_feature_dict: dict = None,
+                 out_feature: int = 128,
                  encoder_dict: dict = None, 
                  ae_dict: nn.ModuleDict = None,
                  fusion: str = 'projection', 
-                 proj_dim: int = 128):
+                 proj_dim: int = 128,
+                 fc_expand_feature: int = 128,
+                 dropout_ratio: float = 0.3,
+                 act=nn.ReLU):
         """
         encoder_dict: Dictionary mapping modality name to its encoder (nn.Module). 
                       If None, a default encoder_dict will be constructed.
@@ -20,18 +25,21 @@ class MultimodalModel(nn.Module):
         """
         super().__init__()
 
+        assert fusion in ['concat', 'attention', 'projection'], f"Unsupported fusion type: {fusion}"
+        assert not len(in_feature_dict) == 0, "in_feature_dict must be provided"
+
         if encoder_dict is None:
             encoder_dict = {
-                'mAmbience': ResidualFCEncoder(in_feature=32, out_feature=128, ae=get_ae(ae_dict, 'mAmbience')),
-                'mBle': ResidualFCEncoder(in_feature=16, out_feature=128, ae=get_ae(ae_dict, 'mBle')),
-                'mGps': Conv1dEncoder(in_ch=8, out_ch=128, ae=get_ae(ae_dict, 'mGps')),
-                'mLight': ResidualFCEncoder(in_feature=16, out_feature=128, ae=get_ae(ae_dict, 'mLight')),
-                'mScreenStatus': ResidualFCEncoder(in_feature=8, out_feature=128, ae=get_ae(ae_dict, 'mScreenStatus')),
-                'mUsageStats': TabTransformerEncoder(num_features=10, dim=128, ae=get_ae(ae_dict, 'mUsageStats')),
-                'mWifi': ResidualFCEncoder(in_feature=16, out_feature=128, ae=get_ae(ae_dict, 'mWifi')),
-                'wHr': Conv1dEncoder(in_ch=1, out_ch=128, ae=get_ae(ae_dict, 'wHr')),
-                'wLight': Conv1dEncoder(in_ch=1, out_ch=128, ae=get_ae(ae_dict, 'wLight')),
-                'wPedo': Conv1dEncoder(in_ch=3, out_ch=128, ae=get_ae(ae_dict, 'wPedo')),
+                'mAmbience': ResidualFCEncoder(in_feature=in_feature_dict['mAmbience'], expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, out_feature=out_feature, ae=get_ae(ae_dict, 'mAmbience')),
+                'mBle': ResidualFCEncoder(in_feature=in_feature_dict['mBle'], expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, out_feature=out_feature, ae=get_ae(ae_dict, 'mBle')),
+                'mGps': Conv1dEncoder(in_ch=in_feature_dict['mGps'], out_ch=out_feature, ae=get_ae(ae_dict, 'mGps'), act=act),
+                'mLight': ResidualFCEncoder(in_feature=in_feature_dict['mLight'], out_feature=out_feature, expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, ae=get_ae(ae_dict, 'mLight')),
+                'mScreenStatus': ResidualFCEncoder(in_feature=in_feature_dict['mScreenStatus'], out_feature=out_feature, expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, ae=get_ae(ae_dict, 'mScreenStatus')),
+                'mUsageStats': TabTransformerEncoder(num_features=in_feature_dict['mUsageStats'], dim=out_feature, ae=get_ae(ae_dict, 'mUsageStats')),
+                'mWifi': ResidualFCEncoder(in_feature=in_feature_dict['mWifi'], out_feature=out_feature, expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, ae=get_ae(ae_dict, 'mWifi')),
+                'wHr': Conv1dEncoder(in_ch=in_feature_dict['wHr'], out_ch=out_feature, act=act, ae=get_ae(ae_dict, 'wHr')),
+                'wLight': Conv1dEncoder(in_ch=in_feature_dict['wLight'], out_ch=out_feature, act=act,ae=get_ae(ae_dict, 'wLight')),
+                'wPedo': Conv1dEncoder(in_ch=in_feature_dict['wPedo'], out_ch=out_feature, act=act, ae=get_ae(ae_dict, 'wPedo')),
             }
             
         self.encoders = nn.ModuleDict(encoder_dict)

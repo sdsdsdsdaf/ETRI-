@@ -32,7 +32,7 @@ class Expert(nn.Module):
     def forward(self, x):  # x: (B, D)
         return self.layer(x)
 
-class MoE(nn.Module):
+class MoE(nn.Module): #Input: (B, D), Output: (B, D)
     def __init__(self, 
                  input_dim: int,
                  num_experts: int = 3,

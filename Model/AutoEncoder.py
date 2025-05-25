@@ -14,6 +14,7 @@ class FCAutoencoder(nn.Module):
             nn.ReLU(),
             nn.Linear(128, in_dim)
         )
+        
 
     def forward(self, x):
         z = self.encoder(x)
