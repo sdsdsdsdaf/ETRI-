@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "🟢 Run: 현재 열려 있는 파일 (Current File)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",  // 현재 열려 있는 파일
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "📦 Run: model.py (직접 실행)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/model.py",  // workspace 기준 절대 경로
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "🧱 Run: Model 패키지로 실행 (모듈 실행)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "Model",  // Model/__main__.py가 필요
+      "console": "integratedTerminal"
+    }
+  ]
+}
