@@ -10,14 +10,13 @@ class ResidualFCEncoder(nn.Module):
         self, 
         in_feature:int, 
         out_feature:int,
-        expand_feature:int = 128, 
         act=nn.ReLU, 
         dropout_ratio=0.3,
         ae:Optional[Union[FCAutoencoder]]=None, 
-        hidden_layer_list: Optional[list[int]] = None,# Autoencoder
+        hidden_layer_list: Optional[list[int]] = None, # Autoencoder
     ):
         
-        assert len(hidden_layer_list) % 2 == 1, "hidden_layer_list must Odd."
+        assert len(hidden_layer_list) % 3 == 1, "hidden_layer_list must be 3n + 1."
 
 
         super().__init__()
@@ -33,12 +32,12 @@ class ResidualFCEncoder(nn.Module):
         
         self.out_features = out_feature
         layers = []
-        for i in range(len(hidden_layer_list) - 1):
+        for i in range(len(hidden_layer_list) // 3):
             layers.append(
                 ResidualFCBlock(
-                    in_feature=hidden_layer_list[i], 
-                    out_feature=hidden_layer_list[i + 1], 
-                    expand_feature=expand_feature, 
+                    in_feature=hidden_layer_list[3*i], 
+                    out_feature=hidden_layer_list[3*i + 2], 
+                    expand_feature=hidden_layer_list[3*i + 1], 
                     act=act, 
                     dropout_ratio=dropout_ratio
                 )
