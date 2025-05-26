@@ -13,30 +13,61 @@ class ResidualFCEncoder(nn.Module):
         expand_feature:int = 128, 
         act=nn.ReLU, 
         dropout_ratio=0.3,
-        ae:Optional[Union[FCAutoencoder]]=None, # Autoencoder
+        ae:Optional[Union[FCAutoencoder]]=None, 
+        hidden_layer_list: Optional[list[int]] = None,# Autoencoder
     ):
         
+        assert len(hidden_layer_list) % 2 == 1, "hidden_layer_list must Odd."
+
+
         super().__init__()
         self.ae = ae
         if ae is not None:
             in_feature = ae.out_features
+
+        if hidden_layer_list is None:
+            hidden_layer_list = [128]
+
+        hidden_layer_list.append(out_feature)  # 마지막 레이어는 out_feature로 설정
+        hidden_layer_list.insert(0, in_feature)  # 첫번째 레이어는 in_feature로 설정
         
         self.out_features = out_feature
+        layers = []
+        for i in range(len(hidden_layer_list) - 1):
+            layers.append(
+                ResidualFCBlock(
+                    in_feature=hidden_layer_list[i], 
+                    out_feature=hidden_layer_list[i + 1], 
+                    expand_feature=expand_feature, 
+                    act=act, 
+                    dropout_ratio=dropout_ratio
+                )
+            )
 
-        self.fcBlock1 = ResidualFCBlock(
-            in_feature, 
-            out_feature, 
-            expand_feature=expand_feature, 
-            act=act, 
-            dropout_ratio=dropout_ratio,
-        )
+
+        self.net = nn.Sequential(*layers) 
 
     def forward(self, x:torch.Tensor):
         if self.ae is not None:
            _, x, _ = self.ae(x)
-        out = self.fcBlock1(x)
+        out = self.net(x)
         return out
 
+
+def _make_stage(in_ch:int, 
+                out_ch:int, 
+                kernel_size:int = 3, 
+                padding:int = 1, 
+                act=nn.ReLU, 
+                num_blocks:int = 2):
+    """
+    Helper function to create a stage of Conv1dBlocks.
+    """
+    layers = []
+    for _ in range(num_blocks):
+        layers.append(Conv1dBlock(in_ch, out_ch, kernel_size=kernel_size, padding=padding, act=act))
+        in_ch = out_ch  # Downsample after each stage
+    return nn.Sequential(*layers)
 
 
 class Conv1dEncoder(nn.Module): #Out Channel 64~128
@@ -47,7 +78,8 @@ class Conv1dEncoder(nn.Module): #Out Channel 64~128
             kernel_size = 3,
             padding = 1,
             act=nn.ReLU,
-            ae:Optional[Union[Conv1DAutoencoder]]=None
+            ae:Optional[Union[Conv1DAutoencoder]]=None,
+            cnn_list:list = [2, 2, 2]  # 각 단계의 CNN 레이어 수
             ):
         #TODO: 필요하다면 stride, dilation, groups 추가
         
@@ -58,17 +90,21 @@ class Conv1dEncoder(nn.Module): #Out Channel 64~128
         if ae is not None:
             in_ch = ae.out_features
 
+        if len(cnn_list) != 3:
+            raise ValueError("cnn_list must contain exactly 3 integers, e.g., [2, 2, 2]")
+
+        stage1 = _make_stage(in_ch, out_ch//4, kernel_size=kernel_size, padding=padding, act=act, num_blocks=cnn_list[0])  # t=24
+        stage2 = _make_stage(out_ch//4, out_ch//2, kernel_size=kernel_size, padding=padding, act=act, num_blocks=cnn_list[1])
+        stage3 = _make_stage(out_ch//2, out_ch, kernel_size=kernel_size, padding=padding, act=act, num_blocks=cnn_list[2])
+
         self.net = nn.Sequential(
-            Conv1dBlock(in_ch, out_ch//4, kernel_size=kernel_size, padding=padding, act=act),  # t=24
-            Conv1dBlock(out_ch//4, out_ch//4, kernel_size=3, padding=1, act=act),     # t=24
+            stage1,   # t=24
             nn.AvgPool1d(kernel_size=2),                       # → t=12
 
-            Conv1dBlock(out_ch//4, out_ch//2, kernel_size=kernel_size, padding=padding, act=act),    # t=12
-            Conv1dBlock(out_ch//2, out_ch//2, kernel_size=kernel_size, padding=padding, act=act),   # t=12
+            stage2,  # t=12
             nn.AvgPool1d(kernel_size=2),                       # → t=6
 
-            Conv1dBlock(out_ch//2, out_ch, kernel_size=kernel_size, padding=padding, act=act),   # t=6
-            Conv1dBlock(out_ch, out_ch, kernel_size=3, padding=1, act=act),  # t=6
+            stage3, # t=6
             nn.AdaptiveAvgPool1d(1),   # t=6
         )
 

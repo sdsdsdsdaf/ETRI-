@@ -8,9 +8,10 @@ class ResidualFCBlock(nn.Module):
             self, 
             in_feature:int, 
             out_feature:int,
-            expand_feature:int = 128, 
+            expand_feature:int=128, 
             act=nn.ReLU, 
             dropout_ratio=0.3,
+            use_bn=False, # Autoencoder
         ):
         
         super().__init__()
@@ -21,7 +22,10 @@ class ResidualFCBlock(nn.Module):
 
         if dropout_ratio is not None and dropout_ratio > 0:
             self.drop = nn.Dropout(dropout_ratio)
-
+        if use_bn:
+            self.norm1 = nn.BatchNorm1d(expand_feature)
+            self.norm2 = nn.BatchNorm1d(out_feature)
+            
         self.proj = nn.Linear(in_feature, out_feature) if in_feature != out_feature else nn.Identity()
 
         for m in self.modules():
@@ -36,8 +40,13 @@ class ResidualFCBlock(nn.Module):
     def forward(self, x:torch.Tensor):
         residual = self.proj(x)
         out = self.fc1(x)
+        if hasattr(self, 'norm1'):
+            out = self.norm1(out)
         out = self.act(out)
         out = self.fc2(out)
+        if hasattr(self, 'norm2'):
+            out = self.norm2(out)
+        out = self.act(out)
 
         if self.drop is not None:
             out = self.drop(out)
