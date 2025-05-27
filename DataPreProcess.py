@@ -7,10 +7,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import ast
 from typing import Optional, Union
+from functools import reduce
 
 
 MultiModal_data_list = ['mACStatus', 'mActivity', 'mAmbience', 'mBle', 'mGps', 'mLight',
                         'mScreenStatus', 'mUsageStats', 'mWifi', 'wHr', 'wLight', 'wPedo']
+
+MultiModal_data_with_time = ['mGps', 'mLight', 'mScreenStatus', 'wHr', 'wLight', 'wPedo']
 
 metrics_train = pd.read_csv('Data\ch2025_metrics_train.csv')
 sample_submission = pd.read_csv('Data\ch2025_submission_sample.csv')
@@ -20,6 +23,8 @@ top_10_labels = [
     "Narration, monologue", "Child speech, kid speaking",
     "Conversation", "Speech synthesizer", "Shout", "Babbling"
 ]
+
+block_num  = 6
 
 # ✅ 기준 쌍 (subject_id, lifelog_date)
 sample_submission['lifelog_date'] = pd.to_datetime(sample_submission['lifelog_date'])
@@ -31,65 +36,14 @@ def get_time_block(timestamp: Union[pd.Series, pd.Timestamp], block_num = 24) ->
     hours_per_block = 24 // block_num
     return timestamp.dt.hour // hours_per_block
 
-def summaarize_mBle_daliy(df: pd.DataFrame) -> pd.DataFrame:
 
-    grouped = df.groupby(['subject_id', 'date']).agg({
-        'device_class_0_cnt': 'sum',
-        'device_class_others_cnt': 'sum',
-        'rssi_mean': 'mean',
-        'rssi_min': 'min',
-        'rssi_max': 'max',
-    }).reset_index()
-
-    total_cnt = grouped['device_class_0_cnt'] + grouped['device_class_others_cnt']
-    grouped['device_class_0_ratio'] = grouped['device_class_0_cnt'] / total_cnt.replace(0, np.nan)
-    grouped['device_class_others_ratio'] = grouped['device_class_others_cnt'] / total_cnt.replace(0, np.nan)
-
-    grouped.drop(columns=['device_class_0_cnt', 'device_class_others_cnt'], inplace=True)
-
-    return grouped
-
-
-def process_mBle(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['date'] = df['timestamp'].dt.date
-
-    features = []
-
-    for idx, row in df.iterrows():
-        entry = ast.literal_eval(row['m_ble']) if isinstance(row['m_ble'], str) else row['m_ble']
-
-        rssi_list = []
-        class_0_count = 0
-        class_other_count = 0
-
-        for device in entry:
-            try:
-                rssi = int(device['rssi'])
-                rssi_list.append(rssi)
-
-                if str(device['device_class']) == '0':
-                    class_0_count += 1
-                else:
-                    class_other_count += 1
-            except:
-                continue  # malformed record
-
-        feature = {
-            'subject_id': row['subject_id'],
-            'date': row['date'],
-            'device_class_0_cnt': class_0_count,
-            'device_class_others_cnt': class_other_count,
-            'device_count': len(rssi_list),
-            'rssi_mean': np.mean(rssi_list) if rssi_list else np.nan,
-            'rssi_min': np.min(rssi_list) if rssi_list else np.nan,
-            'rssi_max': np.max(rssi_list) if rssi_list else np.nan,
-        }
-        features.append(feature)
-
-    df = pd.DataFrame(features)
-    return summaarize_mBle_daliy(df)
+#TODO: TRAIN데이터에서 각 ROW마다 데이터 있는지 확인 후 INNER JOIN으로 MERGE하게 변경
+def get_common_keys(preprocessed_dict: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    """
+    key_dfs = [df[['subject_id', 'date']] for df in preprocessed_dict.values()]
+    common_keys = reduce(lambda left, right: pd.merge(left, right, on=['subject_id', 'date'], how='inner'), key_dfs)
+    return common_keys.drop_duplicates()
 
 
 def preprocess_data(df: pd.DataFrame, timestamp_col: str = 'timestamp', SD: Optional[int] = 42) -> tuple:
@@ -124,6 +78,15 @@ def preprocess_data(df: pd.DataFrame, timestamp_col: str = 'timestamp', SD: Opti
         preprocess_data_dict[f"{name}"] = globals()[f"process_{name}"](lifelog_data[name])
         print(f"✅ Processed: {name}, shape = {preprocess_data_dict[f'{name}'].shape}")
         print(preprocess_data_dict[f"{name}"])
+
+    # common_keys
+    common_keys = get_common_keys(preprocess_data_dict)
+    print(f"✅ Common keys found: {common_keys.shape[0]}")
+
+    for name, df in preprocess_data_dict.items():
+        # Merge with common keys
+        preprocess_data_dict[name] = pd.merge(common_keys, df, on=['subject_id', 'date'], how='inner')
+        print(f"✅ Merged {name} with common keys, shape = {preprocess_data_dict[name].shape}")
 
     return 0
     
@@ -309,7 +272,7 @@ def process_mGps(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['date'] = df['timestamp'].dt.date
-    df['block'] = get_time_block(df['timestamp'], block_num=24)
+    df['block'] = get_time_block(df['timestamp'], block_num=8)
     df = df.sort_values(['subject_id', 'timestamp'])
 
     features = []
@@ -362,10 +325,10 @@ def process_mLight(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['date'] = df['timestamp'].dt.date
-    df['hour'] = df['timestamp'].dt.hour
-    df['is_night'] = df['hour'].apply(lambda h: h >= 22 or h < 6)
+    df['block'] = get_time_block(df['timestamp'], block_num=8)
+    df['is_night'] = df['timestamp'].dt.hour.astype('int').apply(lambda h: h >= 22 or h < 6)
 
-    hourly = df.groupby(['subject_id', 'date', 'hour']).agg(
+    hourly = df.groupby(['subject_id', 'date', 'block']).agg(
         light_mean=('m_light', 'mean'),
         light_std=('m_light', 'std'),
         light_max=('m_light', 'max'),
@@ -449,7 +412,7 @@ def process_wHr(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['date'] = df['timestamp'].dt.date
-    df['block'] = get_time_block(df['timestamp'], block_num=24)
+    df['block'] = get_time_block(df['timestamp'], block_num=8)
 
     results = []
 
@@ -510,7 +473,7 @@ def process_wLight(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['date'] = df['timestamp'].dt.date
-    df['block'] = get_time_block(df['timestamp'], block_num=24)
+    df['block'] = get_time_block(df['timestamp'], block_num=8)
 
     results = []
 
@@ -536,7 +499,7 @@ def process_wPedo(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['date'] = df['timestamp'].dt.date
-    df['block'] = get_time_block(df['timestamp'], block_num=24)
+    df['block'] = get_time_block(df['timestamp'], block_num=8)
 
     summary = df.groupby(['subject_id', 'date', 'block']).agg({
         'step': 'sum',
