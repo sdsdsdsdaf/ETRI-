@@ -309,7 +309,7 @@ def process_wHr(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def interpolates_with_mask(lifelog_data:dict[str, pd.DataFrame], method='linear'):
-
+    
     interpolated_results = {}
     os.makedirs(dir_name, exist_ok=True)
     for name, df in lifelog_data.items():
