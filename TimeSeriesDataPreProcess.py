@@ -104,7 +104,7 @@ def summarize_mBle_daily(df:pd.DataFrame):
     grouped['device_class_others_ratio'] = grouped['device_class_others_cnt'] / total_cnt.replace(0, np.nan)
 
     # 필요 없는 원래 cnt 컬럼 제거
-    grouped.drop(columns=['device_class_0_cnt', 'device_class_others_cnt'], inplace=True)
+    grouped.drop(columns=['device_class_0_cnt', 'device_class_others_cnt',], inplace=True)
 
     return grouped
 
@@ -171,7 +171,7 @@ def filter_dropped_rows(df: pd.DataFrame, drop_set: set[tuple[str, str]]) -> pd.
 
     df = df[~df.apply(lambda row: (row['subject_id'], row['date']) in drop_set, axis=1)]
 
-    return df.drop(columns='date')
+    return df
 
 
 def process_mAmbience_top10(df:pd.DataFrame):
@@ -261,6 +261,7 @@ def process_mUsageStats(df:pd.DataFrame)->pd.DataFrame:
         feature = {
             'subject_id': subj,
             'timestamp': ts,
+            'date': ts.date(),
             'others_time': others_time
         }
         # 각 앱별 컬럼 추가
@@ -290,6 +291,7 @@ def process_mWifi(df:pd.DataFrame) -> pd.DataFrame:
         results.append({
             'subject_id': subj,
             'timestamp': ts,
+            'date': ts.date(),
             'wifi_rssi_mean': np.mean(rssi_all) if rssi_all else np.nan,
             'wifi_rssi_min': np.min(rssi_all) if rssi_all else np.nan,
             'wifi_rssi_max': np.max(rssi_all) if rssi_all else np.nan,
@@ -301,17 +303,114 @@ def process_mWifi(df:pd.DataFrame) -> pd.DataFrame:
 def process_wHr(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['date'] = df['timestamp'].dt.date
     df['hr_mean'] = pd.to_numeric(df['heart_rate'], errors='coerce')  # 각 row의 heart_rate 사용
     df.drop(columns=['heart_rate'], inplace=True)
     return df
 
+def interpolates_with_mask(lifelog_data:dict[str, pd.DataFrame], method='linear'):
+
+    interpolated_results = {}
+    os.makedirs(dir_name, exist_ok=True)
+    for name, df in lifelog_data.items():
+        print(f"⏳ {name} 전처리 중..")
+        if 'timestamp' in df.columns:
+            df = df.sort_values(by="timestamp")
+        else:
+            df = df.sort_values(by="date")
+
+        num_df = df.select_dtypes(include='number')
+
+        nan_mask = num_df.isna()
+        df = df.infer_objects(copy=False)
+        df_interp = num_df.interpolate(method=method)
+
+        # 원본 df에 보간된 수치형 덮어쓰기
+        df.update(df_interp)        
+
+        # 보간된 위치 마스크
+        mask = nan_mask & df_interp.notna()
+        mask_with_id = mask.copy()
+        mask_with_id['subject_id'] = df['subject_id'].values
+        if 'timestamp' in df.columns:
+            mask_with_id['timestamp'] = df['timestamp'].values
+        else:
+            mask_with_id['date'] = df['date'].values
+
+        interpolated_results[name] = {
+            'data': df,
+            'mask': mask_with_id
+        }
+        print(f"✅ {name} 전처리 완료")
+        interpolated_results[name]['data'].to_csv(f"{dir_name}{name}{method}_interpolates.csv")
+    with open(f"{dir_name}Interpolates_all_day_{method}_{file_name}", 'wb') as f:
+        pkl.dump(interpolated_results, f)
+        print("✅ File Saved")
+
+    return interpolated_results
+
+def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='linear'):
+    interpolated_results = {}
+    os.makedirs(dir_name, exist_ok=True)
+
+    for name, df in lifelog_data.items():
+        print(f"⏳ {name} 전처리 중..")
+
+        df = df.copy()
+        interpolated_dfs = []
+        mask_dfs = []
+
+        for (subj, date), group in df.groupby(['subject_id', 'date']):
+
+            if 'timestamp' in group.columns:
+                group = group.sort_values(by="timestamp")
+            else:
+                group = group.sort_values(by="date")
+
+            num_df = group.select_dtypes(include='number')
+            nan_mask = num_df.isna()
+
+            num_df = num_df.infer_objects(copy=False)
+            df_interp = num_df.interpolate(method=method, limit_direction='both')
+            df_interp.index = group.index
+            mask = nan_mask & df_interp.notna()
+
+            group.update(df_interp) 
+
+            mask = mask.copy()
+            mask['subject_id'] = group['subject_id'].values
+            mask['timestamp'] = group['timestamp'].values
+            mask_dfs.append(mask)
+
+            interpolated_dfs.append(group)
+
+        interpolated_df = pd.concat(interpolated_dfs, ignore_index=True)
+        mask_df = pd.concat(mask_dfs, ignore_index=True)
+
+        interpolated_results[name] = {
+            'data': interpolated_df,
+            'mask': mask_df
+        }
+        print(f"✅ {name} 전처리 완료")
+        interpolated_results[name]['data'].to_csv(f"{dir_name}{name}_daily_{method}_interpolates.csv")
+        print("✅ File Saved")
+
+    with open(f"{dir_name}Interpolates_daliy_{method}_{file_name}", 'wb') as f:
+        pkl.dump(interpolated_results, f)
+        print("✅ File Saved")
+
+    return interpolated_results
+
+
 def preprocessing():
-    if os.path.exists("Data\PreProcessingData\Proprocessingdata.pkl"):
-        with open("Data\PreProcessingData\Proprocessingdata.pkl", 'rb') as f:
+    if os.path.exists(dir_name + "Interpolates_all_day_" + file_name):
+        with open(dir_name + "Interpolates_all_day_" + file_name, 'rb') as f:
             interpolated_results = pkl.load(f)
             print("✅ File Loaded")
-
-
+    elif os.path.exists(dir_name + "Interpolates_per_day_" + file_name):
+        with open(dir_name + "Interpolates_per_day_" + file_name, 'rb') as f:
+            interpolated_results = pkl.load(f)
+            print("✅ File Loaded")
     else:
         data_dir = "Data\ch2025_data_items"
 
@@ -351,39 +450,10 @@ def preprocessing():
         lifelog_data['mWifi'] = process_mWifi(lifelog_data['mWifi'])
         lifelog_data['wHr'] = process_wHr(lifelog_data['wHr'])
 
-
-        interpolated_results = {}     
-        for name, df in lifelog_data.items():
-            
-            print(f"⏳ {name} 전처리 중..")
-
-            if 'timestamp' in df.columns:
-               df = df.sort_values(by="timestamp")
-            else:
-                df = df.sort_values(by="date")
-
-            num_df = df.select_dtypes(include='number')
-
-            nan_mask = num_df.isna()
-            df_interp = num_df.interpolate(method='linear')
-
-            # 원본 df에 보간된 수치형 덮어쓰기
-            df.update(df_interp)        
-
-            # 보간된 위치 마스크
-            mask = nan_mask & df_interp.notna()
-
-            interpolated_results[name] = {
-                'data': df,
-                'mask': mask
-            }
-            print(f"✅ {name} 전처리 완료")
-            interpolated_results[name]['data'].to_csv(dir_name + str(name) + ".csv")
-
-        with open(dir_name + "Proprocessing" + file_name, 'wb') as f:
-            pkl.dump(interpolated_results, f)
-            print("✅ File Saved")
-
+        #TODO 보간 함수 삽입
+        interpolated_results = interpolates_with_mask(lifelog_data)
+        #interpolated_results = interpolates_with_mask_daily(lifelog_data)
+    
     return interpolated_results
 
 def data_load_and_split_test_and_train():
