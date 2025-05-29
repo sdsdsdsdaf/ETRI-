@@ -1,0 +1,9 @@
+/Data/
+__pycache__/
+**/__pycache__/
+**/test.py
+test.py
+데이터변환.py
+**/*.pkl
+**/*.csv
+**/*/ipynb
