@@ -410,22 +410,29 @@ def interpolates_with_mask(lifelog_data:Dict[str, pd.DataFrame] = {}, method='li
         nan_mask = num_df.isna()
         df = df.infer_objects(copy=False)
         df_interp = num_df.interpolate(method=method, limit_direction='both')
+        interpolation_ratio = nan_mask.mean(axis=1)
 
         # 원본 df에 보간된 수치형 덮어쓰기
         df.update(df_interp)        
         # 보간된 위치 마스크
-        mask = nan_mask & df_interp.notna()
+        mask = ~(nan_mask & df_interp.notna()) & df_interp.notna()
 
+        # mask: DataFrame of shape (T, F) where True는 보간된 셀
         if is_continuous:
-            interpolated_per_col = mask.sum(axis=0) 
-            total_per_col = mask.shape[0]
-            interpolation_ratio = (interpolated_per_col / total_per_col).fillna(0)
+            # 보간 위치만 실측 비율로, 나머지는 1.0
+            observation_ratio = 1.0 - interpolation_ratio
+            observation_ratio_matrix = np.tile(observation_ratio.values[None, :], (mask.shape[0], 1))
+
+            final_mask = np.where(mask, observation_ratio_matrix, 1.0)
+
             mask = pd.DataFrame(
-                np.tile(interpolation_ratio.values[None, :], (total_per_col, 1)),
+                final_mask,
                 columns=num_df.columns,
                 index=num_df.index
             )
 
+
+        assert df.isna().sum().sum() == 0, "Wrong Interpolation"
 
         mask_with_id = mask.copy()
         mask_with_id['subject_id'] = df['subject_id'].values
@@ -484,8 +491,6 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
         df = df.copy()
         interpolated_dfs = []
         mask_dfs = []
-        total_cells = 0
-        interp_cells = 0
         interpolation_ratio_list = []
         for (subj, date), group in df.groupby(['subject_id', 'date']):
 
@@ -510,8 +515,13 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
             interpolation_ratio_list.append(interpolation_ratio.mean())
 
             if is_continuous:
+                # 보간 위치만 실측 비율로, 나머지는 1.0
+                observation_ratio = 1.0 - interpolation_ratio
+                observation_ratio_matrix = np.tile(observation_ratio.values[None, :], (mask.shape[0], 1))
+                final_mask = np.where(mask, observation_ratio_matrix, 1.0)
+
                 mask = pd.DataFrame(
-                    np.tile(interpolation_ratio.values[None, :], (total_per_col, 1)),
+                    final_mask,
                     columns=num_df.columns,
                     index=num_df.index
                 )
@@ -530,6 +540,8 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
             mask_with_id = mask_with_id[ordered_cols]
             group = group[ordered_cols]
 
+
+            assert group.select_dtypes(include='number').isna().sum().sum() == 0, "Interpolation failed"
             #디버깅
             if len(df_interp) > 0:
                 interpolated_dfs.append(group)
@@ -598,6 +610,8 @@ def reorganize_by_subject_date(
     reorganized = defaultdict(dict)
 
     for modality, result in sorted_result.items():
+
+        drop_cols = ['subject_id'] + (['date'] if 'date' in result['data'].columns else []) + (['timestamp'] if 'timestamp' in result['data'] else [])
         data_df = result['data']
         mask_df = result['mask']
 
@@ -605,8 +619,8 @@ def reorganize_by_subject_date(
         mask_df['date'] = mask_df['date'] if 'date' in mask_df.columns else mask_df['timestamp'].dt.date
 
         for (subj, date), group in data_df.groupby(['subject_id', 'date']):
-            mask_group = mask_df.loc[group.index].reset_index(drop=True)
-            data_group = group.reset_index(drop=True)
+            mask_group = mask_df.loc[group.index].reset_index(drop=True).drop(columns=drop_cols)
+            data_group = group.reset_index(drop=True).drop(columns=drop_cols)
             reorganized[(subj, str(date))][modality] = (data_group, mask_group)
 
 
@@ -768,6 +782,49 @@ def data_load_and_split_test_and_train( #TODO threshhold=0.3, continuous_time=18
         threshhold=0.3, 
         continuous_time=180, 
         is_continuous = False) -> Tuple[dict, dict, dict, dict]:
+    
+    """
+    ## 데이터 구조
+
+    Dict[ 
+
+        key : (subject_id, sleep_date, lifelog_date)
+
+        value: Tuple(
+
+            sleep_date: Dict[
+
+                key: (subject_id, sleep_date)
+
+                value: Tuple(
+
+                    data,
+
+                    mask
+
+                )
+
+            ],
+
+            lifelog_date: Dict[
+
+                key: (subject_id, lifelog_date)
+
+                value: Tuple(
+
+                    data,
+
+                    mask
+
+                )
+
+            ]
+
+        )
+
+    ]
+
+    """
 
     train_data_dir = os.path.join("Data", "ch2025_metrics_train.csv")
     test_data_dir = os.path.join("Data", "ch2025_submission_sample.csv")

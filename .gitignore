@@ -7,3 +7,4 @@ test.py
 **/*.pkl
 **/*.csv
 **/*/ipynb
+*test.py
