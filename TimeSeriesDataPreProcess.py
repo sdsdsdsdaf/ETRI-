@@ -390,6 +390,16 @@ def process_wHr(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def convert_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
+    exclude_cols = ['timestamp', 'date', 'subject_id']
+    for col in df.columns:
+        if col not in exclude_cols:
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)  # 문자열도 float으로
+            except:
+                pass
+    return df
+
 def interpolates_with_mask(lifelog_data:Dict[str, pd.DataFrame] = {}, method='linear', save_csv = False, is_continuous:bool = False):
     
     print("All day interpolates start")
@@ -420,7 +430,7 @@ def interpolates_with_mask(lifelog_data:Dict[str, pd.DataFrame] = {}, method='li
         # mask: DataFrame of shape (T, F) where True는 보간된 셀
         if is_continuous:
             # 보간 위치만 실측 비율로, 나머지는 1.0
-            observation_ratio = 1.0 - interpolation_ratio
+            observation_ratio = (1.0 - interpolation_ratio).fillna(0)
             observation_ratio_matrix = np.tile(observation_ratio.values[None, :], (mask.shape[0], 1))
 
             final_mask = np.where(mask, observation_ratio_matrix, 1.0)
@@ -451,8 +461,8 @@ def interpolates_with_mask(lifelog_data:Dict[str, pd.DataFrame] = {}, method='li
         mask_with_id = mask_with_id[ordered_cols]
 
         interpolated_results[name] = {
-            'data': df,
-            'mask': mask_with_id 
+            'data': convert_numeric_columns(df),
+            'mask': convert_numeric_columns(mask_with_id) 
         }
         print(f"✅ {name} 전처리 완료")
         if save_csv:
@@ -516,7 +526,7 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
 
             if is_continuous:
                 # 보간 위치만 실측 비율로, 나머지는 1.0
-                observation_ratio = 1.0 - interpolation_ratio
+                observation_ratio = (1.0 - interpolation_ratio).fillna(0)
                 observation_ratio_matrix = np.tile(observation_ratio.values[None, :], (mask.shape[0], 1))
                 final_mask = np.where(mask, observation_ratio_matrix, 1.0)
 
@@ -554,9 +564,12 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
         mask_df = pd.concat(mask_dfs, ignore_index=True)
 
         interpolated_results[name] = {
-            'data': interpolated_df,
-            'mask': mask_df
+            'data': convert_numeric_columns(interpolated_df),
+            'mask': convert_numeric_columns(mask_df)
         }
+
+        if interpolated_results[name]['data'].shape[0] == 0:
+            print("DataFrame is Null")
         print(f"✅ {name} 전처리 완료")
         if save_csv:
             interpolated_results[name]['data'].to_csv(f"{dir_name}{name}_daily_{method}_{mask_type}_interpolates.csv")
@@ -782,50 +795,7 @@ def data_load_and_split_test_and_train( #TODO threshhold=0.3, continuous_time=18
         threshhold=0.3, 
         continuous_time=180, 
         is_continuous = False) -> Tuple[dict, dict, dict, dict]:
-    
-    """
-    ## 데이터 구조
-
-    Dict[ 
-
-        key : (subject_id, sleep_date, lifelog_date)
-
-        value: Tuple(
-
-            sleep_date: Dict[
-
-                key: (subject_id, sleep_date)
-
-                value: Tuple(
-
-                    data,
-
-                    mask
-
-                )
-
-            ],
-
-            lifelog_date: Dict[
-
-                key: (subject_id, lifelog_date)
-
-                value: Tuple(
-
-                    data,
-
-                    mask
-
-                )
-
-            ]
-
-        )
-
-    ]
-
-    """
-
+ 
     train_data_dir = os.path.join("Data", "ch2025_metrics_train.csv")
     test_data_dir = os.path.join("Data", "ch2025_submission_sample.csv")
 
@@ -845,8 +815,8 @@ def data_load_and_split_test_and_train( #TODO threshhold=0.3, continuous_time=18
                                     save_csv=save_csv, 
                                     is_daily=is_daily, 
                                     method=method, 
-                                    threshhold=0.3, 
-                                    continuous_time=180, 
+                                    threshhold=threshhold, 
+                                    continuous_time=continuous_time, 
                                     is_continuous=is_continuous)
     
     reorganized_result = reorganize_by_subject_date(interpolated_results)
@@ -876,16 +846,15 @@ def data_load_and_split_test_and_train( #TODO threshhold=0.3, continuous_time=18
     print("📦 [test_dict] 생성 완료 (tqdm)...")
     
     test_label = {
-        (row.subject_id, pd.to_datetime(row.sleep_date).date(), pd.to_datetime(row.lifelog_date).date()):{
-            "Q1": row.Q1,
-            "Q2": row.Q2,
-            "Q3": row.Q3,
-            "S1": row.S1,
-            "S2": row.S2,
-            "S3": row.S3
-        }
-        for _, row in test_data.iterrows()
-    }
+        (row.subject_id, pd.to_datetime(row.sleep_date).date(), pd.to_datetime(row.lifelog_date).date()):
+            [row.Q1,
+            row.Q2,
+            row.Q3,
+            row.S1,
+            row.S2,
+            row.S3]
+        for _, row in test_data.iterrows()}
+    
     train_dict = dict(sorted(train_dict.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])))
     train_label = dict(sorted(train_label.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])))
 
@@ -905,7 +874,8 @@ def count_unique_modalities(train_dict):
         active_modalities = set()
 
         if sleep_data:
-            active_modalities.update([k for k, v in sleep_data.items() if v is not None])
+            #active_modalities.update([k for k, v in sleep_data.items() if v is not None])
+            pass
         if lifelog_data:
             active_modalities.update([k for k, v in lifelog_data.items() if v is not None])
 
@@ -928,6 +898,54 @@ def count_none_per_modality(train_dict):
                     lifelog_none_counts[modality] += 1
 
     return sleep_none_counts, lifelog_none_counts
+
+
+def filter_data_and_labels_by_modalities(
+    data_dict: dict,
+    label_dict: dict,
+    min_modalities_sleep: int = 6,
+    min_modalities_lifelog: int = 6,
+    verbose: bool = True
+):
+    filtered_data = {}
+    filtered_labels = {}
+    removed = []
+
+    for key, (sleep_data_dict, lifelog_data_dict) in data_dict.items():
+        subject_id = key[0]
+
+        # 🛡️ None-safe: 각 dict가 None일 수 있음
+        sleep_modalities = set()
+        if isinstance(sleep_data_dict, dict):
+            sleep_modalities = {
+                m for m, val in sleep_data_dict.items()
+                if val is not None and isinstance(val, tuple) and val[0] is not None and not val[0].empty
+            }
+
+        lifelog_modalities = set()
+        if isinstance(lifelog_data_dict, dict):
+            lifelog_modalities = {
+                m for m, val in lifelog_data_dict.items()
+                if val is not None and isinstance(val, tuple) and val[0] is not None and not val[0].empty
+            }
+
+        if len(sleep_modalities) >= min_modalities_sleep and len(lifelog_modalities) >= min_modalities_lifelog:
+            filtered_data[key] = (sleep_data_dict, lifelog_data_dict)
+            if key in label_dict:
+                filtered_labels[key] = label_dict[key]
+        else:
+            removed.append((key, len(sleep_modalities), len(lifelog_modalities)))
+
+    if verbose:
+        print(f"🧼 필터링 전 샘플 수: {len(data_dict)}")
+        print(f"✅ 필터링 후 샘플 수: {len(filtered_data)}")
+        print(f"🎯 남은 라벨 수: {len(filtered_labels)}")
+        print(f"🚫 제거된 샘플 수: {len(removed)}")
+        if removed:
+            print("  예시 →", removed[:5])
+
+    return filtered_data, filtered_labels
+
 
 if __name__ == "__main__":
 
@@ -959,7 +977,7 @@ if __name__ == "__main__":
         print(f'{daliy_or_all_day}_{method}_{mask_type} Data Not Found')
         print(f'Create {daliy_or_all_day}_{method}_{mask_type} Data')
 
-        train_data, train_label, test_data, test_label = data_load_and_split_test_and_train()
+        train_data, train_label, test_data, test_label = data_load_and_split_test_and_train(save_csv=True)
         with open(train_x_file_path, 'wb') as f:
             pkl.dump(train_data, f)
         with open(train_y_file_path, 'wb') as f:
@@ -1008,6 +1026,9 @@ if __name__ == "__main__":
     modality_counts = count_unique_modalities(train_data)
     count_distribution = Counter(modality_counts)
 
+    print(count_distribution)
+    print(len(next(iter(train_data.values()))[0]))
+
     plt.figure(figsize=(8, 5))
     plt.bar(count_distribution.keys(), count_distribution.values())
     plt.xlabel("Number of Non-None Modalities in Sample")
@@ -1015,6 +1036,39 @@ if __name__ == "__main__":
     plt.title("Effective Modality Count per Train Sample")
     plt.grid(True)
     plt.show()
+    
+
+    train_data, train_label = filter_data_and_labels_by_modalities(train_data, train_label)
+
+    train_x_file_name = f"train_data_filtered_{daliy_or_all_day}_{method}_{mask_type}.pkl"
+    train_x_file_path = os.path.join(dir, train_x_file_name)
+    with open(train_x_file_path, 'wb') as f:
+            pkl.dump(train_data, f)
+
+    modality_counts = count_unique_modalities(train_data)
+    count_distribution = Counter(modality_counts)
+
+    print(count_distribution)
+    print(len(next(iter(train_data.values()))[0]))
+
+    plt.figure(figsize=(8, 5))
+    plt.bar(count_distribution.keys(), count_distribution.values())
+    plt.xlabel("Number of Non-None Modalities in Sample")
+    plt.ylabel("Number of Samples")
+    plt.title("Effective Modality Count per Train Sample")
+    plt.grid(True)
+    plt.show()
+
+
+    
+
+
+
+
+
+
+
+
 
 
 
