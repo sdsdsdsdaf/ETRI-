@@ -1,171 +1,277 @@
 import os
+import pickle
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy import signal
 import pandas as pd
-import seaborn as sns
-from scipy.signal import spectrogram
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from typing import Tuple, List, Dict
 import torch
-from typing import List, Tuple
-from torchvision.transforms.functional import to_pil_image
+from PIL import Image
+import matplotlib.pyplot as plt
+from io import BytesIO
+from matplotlib.collections import LineCollection
 
-def load_tensor_and_show(path: str):
-    data = torch.load(path)
-    tensor = data["tensor"]
-    image = to_pil_image(tensor)  # (C, H, W) → PIL.Image
-    image.show()
-    return data
+# ====================
+# Normalize with mask
+# ====================
+def normalize_df_with_mask(data: np.ndarray, mask: np.ndarray, eps: float = 1e-8):
+    masked = data[mask == 1]
+    if len(masked) == 0:
+        return np.zeros_like(data)
 
+    mean = masked.mean()
+    std = masked.std()
 
-def save_tensor_with_meta(
-    tensor: torch.Tensor,
-    path: str,
-    subject_id: str,
-    sleep_date: str,
-    lifelog_date: str,
-    modality_names: List[str],
-    mask_style: str,
-    resize: Tuple[int, int]
-):
-    meta = {
-        "tensor": tensor,
-        "subject_id": subject_id,
-        "sleep_date": sleep_date,
-        "lifelog_date": lifelog_date,
-        "modality_names": modality_names,
-        "mask_style": mask_style,
-        "resize": resize
-    }
-    torch.save(meta, path)
+    centered = data - mean
+    if std < eps:
+        return centered
+    return centered / (std + eps)
 
+# ====================
+# Subplot visualization with variable alpha fill
+# ====================
+def plot_modal_subplot_image(data_df: pd.DataFrame, mask_df: pd.DataFrame, resize=(224, 224)) -> Image.Image:
+    numeric_cols = data_df.select_dtypes(include='number').columns
+    n_features = len(numeric_cols)
+    fig, axes = plt.subplots(
+    n_features, 1,
+    figsize=(3, 2.5 * n_features),  # 🔺 세로 크기 늘림
+    squeeze=False
+    )
+    fig.subplots_adjust(hspace=2)
 
-def normalize_df_with_mask(df: pd.DataFrame, mask_df: pd.DataFrame, eps: float = 1e-8) -> pd.DataFrame:
+    for i, col in enumerate(numeric_cols):
+        if not data_df.index.equals(mask_df.index):
+            data_df = data_df.sort_index()
+            mask_df = mask_df.sort_index()
 
-    normalized_df = df.copy()
-    numeric_cols = df.select_dtypes(include='number').columns
-    print(f"디버깅 수치형 컬럼의 개수: {len(numeric_cols)} 종류: {numeric_cols}")
+        values = data_df[col].values
+        mask = mask_df[col].values
+        data = normalize_df_with_mask(values, mask)
+
+        ax = axes[i, 0]
+        ax.plot(data, color='blue', linewidth=1)
+
+        alpha_vec = 1 - np.clip(mask, 0, 1)
+
+        segments = [
+            [[x, 0], [x, data[x]]]
+            for x in range(len(data))
+        ]
+        colors = [(1, 0, 0, alpha_vec[x]) for x in range(len(data))]
+
+        lc = LineCollection(segments, colors=colors, linewidths=1)
+        ax.add_collection(lc)
+        ax.set_xlim(0, len(data))
+
+        y_min = np.min(data)
+        y_max = np.max(data)
+
+        if np.all(mask == 0):
+            ax.set_facecolor("lightgray")
+            ax.text(0.5, 0.5, "PADDED", color="red", fontsize=10,
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_ylim(-1, 1)
+        elif np.isclose(y_min, y_max, atol=1e-10):
+            margin = 1e-2 if y_min == 0 else abs(y_min * 0.01)
+            ax.set_ylim(y_min - margin, y_max + margin)
+        else:
+            ax.set_ylim(y_min, y_max)
+
+        ax.axis('off')
+    print(f"[{col}] mask.sum(): {mask.sum()}, mask.shape: {mask.shape}, dtype: {mask.dtype}")
+    
+    buf = BytesIO()
+    plt.tight_layout(pad=2.0)
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB")
+    return img.resize(resize)
+
+# ====================
+# Heatmap visualization
+# ====================
+def plot_modal_heatmap_image(data_df: pd.DataFrame, mask_df: pd.DataFrame, resize=(224, 224)) -> Image.Image:
+    numeric_cols = data_df.select_dtypes(include='number').columns
+
+    normed_list = []
+    mask_list = []
 
     for col in numeric_cols:
-        if col not in mask_df:
-            continue
-        values = df[col].values
-        mask = mask_df[col].values.astype(bool)
+        data = data_df[col].values
+        mask = mask_df[col].values
+        normed = normalize_df_with_mask(data, mask)
+        normed_list.append(normed)
+        mask_list.append(np.clip(mask, 0, 1))
 
-        if not mask.any():
-            continue
+    normed_stack = np.stack(normed_list)
+    mask_stack = np.stack(mask_list)
+    masked_data = np.ma.masked_where(mask_stack != 1, normed_stack)
 
-        mean = values[mask].mean()
-        std = values[mask].std()
-
-        normalized_values = (values - mean) / (std + eps)
-        normalized_values[~mask] = 0.0 
-
-        normalized_df[col] = normalized_values
-
-    return normalized_df
-
-# Plot
-def save_plot_image_with_mask(data, mask, path):
-    data = normalize_df_with_mask(data, mask)
-    mask = np.clip(mask, 0, 1)
     plt.figure(figsize=(2, 2))
-    plt.plot(data, linewidth=2, alpha=0.8)
-    plt.fill_between(range(len(data)), data, alpha=1 - mask, color='gray')
+    plt.imshow(masked_data, aspect='auto', cmap='viridis', interpolation='nearest', vmin=-2, vmax=2)
     plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(path, bbox_inches='tight', pad_inches=0)
+    buf = BytesIO()
+    plt.tight_layout(pad=2.0)
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
     plt.close()
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB")
+    return img.resize(resize)
 
-# Heatmap
-def save_heatmap_image_with_mask(data, mask, path):
-    data = normalize_df_with_mask(data, mask)
-    mask = np.clip(mask, 0, 1)
-    masked_data = np.ma.masked_where(mask != 1, data)
-    if len(masked_data.shape) == 1:
-        masked_data = masked_data.reshape(1, -1)
-    plt.figure(figsize=(2, 2))
-    plt.imshow(masked_data, aspect='auto', cmap='viridis')
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(path, bbox_inches='tight', pad_inches=0)
-    plt.close()
+# ====================
+# Convert PIL Image to torch Tensor
+# ====================
+def image_to_tensor(image: Image.Image) -> torch.Tensor:
+    return torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
 
-# Spectrogram
-def save_spectrogram_image_with_mask(data, mask, path, fs=1.0):
-    data = data * mask  # 마스크가 없는 부분은 0으로
-    f, t, Sxx = signal.spectrogram(data, fs)
-    plt.figure(figsize=(2, 2))
-    plt.pcolormesh(t, f, Sxx, shading='gouraud', cmap='viridis')
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(path, bbox_inches='tight', pad_inches=0)
-    plt.close()
+# ====================
+# Merge a list of images vertically
+# ====================
+def merge_images_vertically(images: List[Image.Image]) -> Image.Image:
+    total_height = sum(img.height for img in images)
+    max_width = max(img.width for img in images)
+    merged = Image.new("RGB", (max_width, total_height))
+    y_offset = 0
+    for img in images:
+        merged.paste(img, (0, y_offset))
+        y_offset += img.height
+    return merged
 
-# Bar
-def save_bar_trend_image_with_mask(data, mask, path):
-    data = normalize_df_with_mask(data, mask)
-    mask = np.clip(mask, 0, 1)
-    colors = ['gray' if m < 0.5 else 'blue' for m in mask]
-    plt.figure(figsize=(2, 2))
-    plt.bar(np.arange(len(data)), data, color=colors)
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(path, bbox_inches='tight', pad_inches=0)
-    plt.close()
+def get_none_modalities(modality_dict: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]]) -> List[str]:
+    none_mods = []
+    for name, pair in modality_dict.items():
+        if (
+            pair is None or
+            not isinstance(pair, tuple) or
+            len(pair) != 2 or
+            pair[0] is None or
+            pair[1] is None
+        ):
+            none_mods.append(name)
+    return none_mods
+
+# ====================
+# Main processing function
+# ====================
+def process_all_samples(
+    pkl_path: str,
+    save_dir: str,
+    resize: Tuple[int, int] = (224, 224),
+    img_save: bool = False
+):
+    with open(pkl_path, "rb") as f:
+        data_dict = pickle.load(f)
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    for key, (sleep_dict, lifelog_dict) in data_dict.items():
+        subject_id, sleep_date, lifelog_date = key
 
 
-def process_with_padding(data_dict, output_dir='visual_tensors', modalities_all=None, default_len=1440):
-    os.makedirs(output_dir, exist_ok=True)
-    idx = 1
+        #디버그
+        df = sleep_dict['mLight'][1]
+        print(df.select_dtypes(include='number').sum())
+        for val in sleep_dict.values():
+            if val and isinstance(val, tuple) and val[0] is not None:
+                T = len(val[0])
+                time_values = val[0]["date"]
+                break
 
-    for (subject_id, sleep_date, lifelog_date), (sleep_dict, lifelog_dict) in data_dict.items():
-        for source_name, modal_dict in [('sleep', sleep_dict), ('life', lifelog_dict)]:
-            key = (subject_id, sleep_date if source_name == 'sleep' else lifelog_date)
-            if key not in modal_dict:
+        all_mods = list(set(sleep_dict.keys()) | set(lifelog_dict.keys()))
+        filled_sleep = {}
+        filled_lifelog = {}
+
+        for mod in all_mods:
+            val_s = sleep_dict.get(mod)
+            if val_s is None or not isinstance(val_s, tuple):
+                df = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+            else:
+                df, mask = val_s
+            filled_sleep[mod] = (df, mask)
+
+            val_l = lifelog_dict.get(mod)
+            if val_l is None or not isinstance(val_l, tuple):
+                df = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+            else:
+                df, mask = val_l
+            filled_lifelog[mod] = (df, mask)
+
+        sample_dir = os.path.join(save_dir, f"{subject_id}_{sleep_date}_{lifelog_date}")
+        os.makedirs(sample_dir, exist_ok=True)
+
+        images_plot_sleep, images_heat_sleep = [], []
+        images_plot_lifelog, images_heat_lifelog = [], []
+
+        for modality, (df, mask) in filled_sleep.items():
+            if modality == 'mBle':
                 continue
+            img_plot = plot_modal_subplot_image(df, mask, resize)
+            img_heat = plot_modal_heatmap_image(df, mask, resize)
 
-            for modality in modalities_all:
-                df, mask_df = None, None
-                if modality in modal_dict[key]:
-                    df, mask_df = modal_dict[key][modality]
+            if img_save:
+                img_plot.save(os.path.join(sample_dir, f"sleep_{modality}_plot.png"))
+                img_heat.save(os.path.join(sample_dir, f"sleep_{modality}_heatmap.png"))
 
-                if df is None or mask_df is None or df.empty:
-                    signal = np.zeros(default_len)
-                    mask = np.ones(default_len)  # 마스크를 모두 1로
-                else:
-                    df = df.select_dtypes(include=np.number)
-                    if df.empty:
-                        signal = np.zeros(default_len)
-                        mask = np.ones(default_len)
-                    else:
-                        signal = df.mean(axis=1).to_numpy()
-                        mask = mask_df.select_dtypes(include=np.number).mean(axis=1).to_numpy() > 0.5
-                        if len(signal) < default_len:
-                            pad_len = default_len - len(signal)
-                            signal = np.pad(signal, (0, pad_len), mode='constant')
-                            mask = np.pad(mask.astype(int), (0, pad_len), constant_values=1)
-                        else:
-                            signal = signal[:default_len]
-                            mask = mask[:default_len]
-                        signal = normalize_df_with_mask(signal, mask)
+            images_plot_sleep.append(img_plot)
+            images_heat_sleep.append(img_heat)
 
-                file_id = f"{idx}-{source_name}.pt"
+        for modality, (df, mask) in filled_lifelog.items():
+            if modality == 'mBle':
+                continue
+            img_plot = plot_modal_subplot_image(df, mask, resize)
+            img_heat = plot_modal_heatmap_image(df, mask, resize)
 
-                for mode, plot_func in {
-                    'plot': lambda ax: ax.plot(signal),
-                    'heatmap': lambda ax: sns.heatmap(signal[None, :], cmap='viridis', ax=ax, cbar=False),
-                    'spectrogram': lambda ax: ax.pcolormesh(*spectrogram(signal)[:2], spectrogram(signal)[2], shading='gouraud'),
-                    'bar': lambda ax: ax.bar(np.arange(len(signal)), signal)
-                }.items():
-                    fig, ax = plt.subplots()
-                    try:
-                        plot_func(ax)
-                        path = os.path.join(output_dir, mode, modality, file_id)
-                        os.makedirs(os.path.dirname(path), exist_ok=True)
-                        save_image_tensor(fig, path)
-                    except Exception as e:
-                        plt.close(fig)
-                        print(f"❌ Failed to save {file_id} ({mode}/{modality}): {e}")
+            if img_save:
+                img_plot.save(os.path.join(sample_dir, f"lifelog_{modality}_plot.png"))
+                img_heat.save(os.path.join(sample_dir, f"lifelog_{modality}_heatmap.png"))
 
-        idx += 1
+            images_plot_lifelog.append(img_plot)
+            images_heat_lifelog.append(img_heat)
+
+        merged_plot_sleep = merge_images_vertically(images_plot_sleep)
+        merged_heat_sleep = merge_images_vertically(images_heat_sleep)
+        merged_plot_lifelog = merge_images_vertically(images_plot_lifelog)
+        merged_heat_lifelog = merge_images_vertically(images_heat_lifelog)
+
+        tensor_plot_sleep = image_to_tensor(merged_plot_sleep)
+        tensor_heat_sleep = image_to_tensor(merged_heat_sleep)
+        tensor_plot_lifelog = image_to_tensor(merged_plot_lifelog)
+        tensor_heat_lifelog = image_to_tensor(merged_heat_lifelog)
+
+        mBle_tensor_sleep = torch.tensor(sleep_dict['mBle'][0].values.T)
+        mBle_tensor_lifelog = torch.tensor(lifelog_dict['mBle'][1].values.T)
+
+        meta = {
+            "mBle_tensor_sleep": mBle_tensor_sleep,
+            "mBle_tensor_lifelog": mBle_tensor_lifelog,
+            "tensor_plot_sleep": tensor_plot_sleep,
+            "tensor_heatmap_sleep": tensor_heat_sleep,
+            "tensor_plot_lifelog": tensor_plot_lifelog,
+            "tensor_heatmap_lifelog": tensor_heat_lifelog,
+            "subject_id": subject_id,
+            "sleep_date": str(sleep_date),
+            "lifelog_date": str(lifelog_date),
+            "modality_names": all_mods,
+            "resize": resize
+        }
+
+        file_name = f"{subject_id}_{sleep_date}_{lifelog_date}.pt"
+        torch.save(meta, os.path.join(save_dir, file_name))
+
+        none_sleep_mods = get_none_modalities(sleep_dict)
+        none_lifelog_mods = get_none_modalities(lifelog_dict)
+
+        print("❌ None sleep modalities:", none_sleep_mods)
+        print("❌ None lifelog modalities:", none_lifelog_mods)
+
+
+
+# Run example
+process_all_samples(
+    pkl_path="train_data_subset_5.pkl",
+    save_dir="Img_samples",
+    resize=(224, 224),
+    img_save=True
+)

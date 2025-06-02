@@ -430,10 +430,10 @@ def interpolates_with_mask(lifelog_data:Dict[str, pd.DataFrame] = {}, method='li
         # mask: DataFrame of shape (T, F) where True는 보간된 셀
         if is_continuous:
             # 보간 위치만 실측 비율로, 나머지는 1.0
-            observation_ratio = (1.0 - interpolation_ratio).fillna(0)
-            observation_ratio_matrix = np.tile(observation_ratio.values[None, :], (mask.shape[0], 1))
-
-            final_mask = np.where(mask, observation_ratio_matrix, 1.0)
+            mask_np = mask.to_numpy() if isinstance(mask, pd.DataFrame) else mask
+            observation_ratio = (1.0 - nan_mask.mean(axis=0)).fillna(0)
+            obs_ratio_np = observation_ratio.to_numpy().reshape(1, -1)
+            final_mask = np.where(mask_np, 1.0, obs_ratio_np)
 
             mask = pd.DataFrame(
                 final_mask,
@@ -509,26 +509,27 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
             else:
                 group = group.sort_values(by=["subject_id", "date"])
 
+
+            group = group.infer_objects(copy=False)
             num_df = group.select_dtypes(include='number')
             nan_mask = num_df.isna()
-
-            num_df = num_df.infer_objects(copy=False)
             df_interp = num_df.interpolate(method=method, limit_direction='both')
             df_interp.index = group.index
             mask = nan_mask & df_interp.notna()
 
             # mask: DataFrame of shape (T, F) where True는 보간된 셀
             interpolated_per_col = mask.sum(axis=0)  # Series of length F
+
             total_per_col = mask.shape[0]
             interpolation_ratio = (interpolated_per_col / total_per_col).fillna(0)
-
             interpolation_ratio_list.append(interpolation_ratio.mean())
 
             if is_continuous:
                 # 보간 위치만 실측 비율로, 나머지는 1.0
-                observation_ratio = (1.0 - interpolation_ratio).fillna(0)
-                observation_ratio_matrix = np.tile(observation_ratio.values[None, :], (mask.shape[0], 1))
-                final_mask = np.where(mask, observation_ratio_matrix, 1.0)
+                mask_np = mask.to_numpy() if isinstance(mask, pd.DataFrame) else mask
+                observation_ratio = (1.0 - nan_mask.mean(axis=0)).fillna(0)
+                obs_ratio_np = observation_ratio.to_numpy().reshape(1, -1)
+                final_mask = np.where(mask_np, 1.0, obs_ratio_np)
 
                 mask = pd.DataFrame(
                     final_mask,
@@ -952,7 +953,7 @@ if __name__ == "__main__":
     dir = 'Data_Dict'
     method = 'linear'
     is_daliy = True
-    is_continuous = False
+    is_continuous = True
     mask_type = 'ratio_mask' if is_continuous else 'bit_mask'
     daliy_or_all_day = "daily" if is_daliy else "all_day"
 
@@ -977,7 +978,7 @@ if __name__ == "__main__":
         print(f'{daliy_or_all_day}_{method}_{mask_type} Data Not Found')
         print(f'Create {daliy_or_all_day}_{method}_{mask_type} Data')
 
-        train_data, train_label, test_data, test_label = data_load_and_split_test_and_train(save_csv=True)
+        train_data, train_label, test_data, test_label = data_load_and_split_test_and_train(save_csv=True, is_continuous=is_continuous)
         with open(train_x_file_path, 'wb') as f:
             pkl.dump(train_data, f)
         with open(train_y_file_path, 'wb') as f:
@@ -1059,6 +1060,10 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.show()
 
+    
+    sample = next(iter(train_data.values()))[0]['mLight'][1]
+
+    print(sample)
 
     
 
