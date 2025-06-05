@@ -289,7 +289,7 @@ def process_mGps(df: pd.DataFrame) -> pd.DataFrame:
             try:
                 lat = float(entry['lat'])
                 lon = float(entry['lon'])
-                alt = float(entry['alt'])
+                alt = float(entry.get('altitude', entry.get('alt')))
                 speed = float(entry['speed'])
 
                 latitudes.append(lat)

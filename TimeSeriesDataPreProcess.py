@@ -215,7 +215,7 @@ def process_mGps(df):
 
         for entry in gps_list:
             try:
-                altitudes.append(float(entry['altitude']))
+                altitudes.append(float(entry.get('altitude', entry.get('alt'))))
                 latitudes.append(float(entry['latitude']))
                 longitudes.append(float(entry['longitude']))
                 speeds.append(float(entry['speed']))
