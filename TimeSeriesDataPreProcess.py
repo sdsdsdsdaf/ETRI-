@@ -62,7 +62,7 @@ def process_mBle(df:pd.DataFrame):
                 rssi = int(device['rssi'])
                 rssi_list.append(rssi)
 
-                if str(device['device_class']) == 0:
+                if str(device['device_class']) == '0':
                     class_0_cnt += 1
                 else:
                     class_other_cnt += 1
