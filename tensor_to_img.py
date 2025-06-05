@@ -1,5 +1,6 @@
 import os
 import pickle
+from matplotlib import cm
 import numpy as np
 import pandas as pd
 from typing import Tuple, List, Dict
@@ -50,7 +51,7 @@ def plot_modal_subplot_image(data_df: pd.DataFrame, mask_df: pd.DataFrame, resiz
         ax = axes[i, 0]
         ax.plot(data, color='blue', linewidth=1)
 
-        alpha_vec = 1 - np.clip(mask, 0, 1)
+        alpha_vec = np.clip(mask, 0, 1)
 
         segments = [
             [[x, 0], [x, data[x]]]
@@ -90,30 +91,38 @@ def plot_modal_subplot_image(data_df: pd.DataFrame, mask_df: pd.DataFrame, resiz
 # ====================
 # Heatmap visualization
 # ====================
-def plot_modal_heatmap_image(data_df: pd.DataFrame, mask_df: pd.DataFrame, resize=(224, 224)) -> Image.Image:
+def plot_modal_heatmap_image(data_df, mask_df, resize=(224, 224)) -> Image.Image:
     numeric_cols = data_df.select_dtypes(include='number').columns
 
+    # 정규화 + 마스킹
     normed_list = []
-    mask_list = []
+    alpha_list = []
 
     for col in numeric_cols:
         data = data_df[col].values
-        mask = mask_df[col].values
+        mask = mask_df[col].values  
         normed = normalize_df_with_mask(data, mask)
+
         normed_list.append(normed)
-        mask_list.append(np.clip(mask, 0, 1))
+        alpha_list.append(np.clip(mask, 0, 1)) 
 
-    normed_stack = np.stack(normed_list)
-    mask_stack = np.stack(mask_list)
-    masked_data = np.ma.masked_where(mask_stack != 1, normed_stack)
+    normed_stack = np.stack(normed_list)  # (C, T)
+    alpha_stack = np.stack(alpha_list)    # (C, T)
 
-    plt.figure(figsize=(2, 2))
-    plt.imshow(masked_data, aspect='auto', cmap='viridis', interpolation='nearest', vmin=-2, vmax=2)
-    plt.axis('off')
+    # RGBA 이미지로 변환
+    cmap = cm.get_cmap('viridis')
+    rgba = cmap((normed_stack - (-2)) / (2 - (-2))) 
+    rgba[..., -1] = alpha_stack  # alpha 채널에 마스크 적용
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(2, 2), dpi=100)
+    ax.imshow(rgba, aspect='auto', interpolation='nearest')
+    ax.axis('off')
+
     buf = BytesIO()
     plt.tight_layout(pad=2.0)
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-    plt.close()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, transparent=True)
+    plt.close(fig)
     buf.seek(0)
     img = Image.open(buf).convert("RGB")
     return img.resize(resize)
