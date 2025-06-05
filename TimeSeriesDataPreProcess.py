@@ -343,6 +343,7 @@ def interpolates_with_mask(lifelog_data:dict[str, pd.DataFrame], method='linear'
         }
         print(f"✅ {name} 전처리 완료")
         interpolated_results[name]['data'].to_csv(f"{dir_name}{name}{method}_interpolates.csv")
+    # interpolation 결과 저장
     with open(f"{dir_name}Interpolates_all_day_{method}_{file_name}", 'wb') as f:
         pkl.dump(interpolated_results, f)
         print("✅ File Saved")
@@ -395,20 +396,24 @@ def interpolates_with_mask_daily(lifelog_data:dict[str, pd.DataFrame], method='l
         interpolated_results[name]['data'].to_csv(f"{dir_name}{name}_daily_{method}_interpolates.csv")
         print("✅ File Saved")
 
-    with open(f"{dir_name}Interpolates_daliy_{method}_{file_name}", 'wb') as f:
+    # interpolation 결과 저장 (일별)
+    with open(f"{dir_name}Interpolates_per_day_{method}_{file_name}", 'wb') as f:
         pkl.dump(interpolated_results, f)
         print("✅ File Saved")
 
     return interpolated_results
 
 
-def preprocessing():
-    if os.path.exists(dir_name + "Interpolates_all_day_" + file_name):
-        with open(dir_name + "Interpolates_all_day_" + file_name, 'rb') as f:
+def preprocessing(method: str = 'linear'):
+    load_path_all = f"{dir_name}Interpolates_all_day_{method}_{file_name}"
+    load_path_per = f"{dir_name}Interpolates_per_day_{method}_{file_name}"
+
+    if os.path.exists(load_path_all):
+        with open(load_path_all, 'rb') as f:
             interpolated_results = pkl.load(f)
             print("✅ File Loaded")
-    elif os.path.exists(dir_name + "Interpolates_per_day_" + file_name):
-        with open(dir_name + "Interpolates_per_day_" + file_name, 'rb') as f:
+    elif os.path.exists(load_path_per):
+        with open(load_path_per, 'rb') as f:
             interpolated_results = pkl.load(f)
             print("✅ File Loaded")
     else:
@@ -451,12 +456,13 @@ def preprocessing():
         lifelog_data['wHr'] = process_wHr(lifelog_data['wHr'])
 
         #TODO 보간 함수 삽입
-        interpolated_results = interpolates_with_mask(lifelog_data)
-        #interpolated_results = interpolates_with_mask_daily(lifelog_data)
+        interpolated_results = interpolates_with_mask(lifelog_data, method)
+        #interpolated_results = interpolates_with_mask_daily(lifelog_data, method)
     
     return interpolated_results
 
 def data_load_and_split_test_and_train():
+    # 기본 보간 방법은 linear
     interpolated_results = preprocessing()
 
     print(interpolated_results['wHr']['data'].shape)
