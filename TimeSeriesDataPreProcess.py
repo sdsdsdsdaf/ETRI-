@@ -412,7 +412,7 @@ def preprocessing():
             interpolated_results = pkl.load(f)
             print("✅ File Loaded")
     else:
-        data_dir = "Data\ch2025_data_items"
+        data_dir = os.path.join('Data', 'ch2025_data_items')
 
         # Parquet 파일 전체 경로 리스트
         parquet_files = glob.glob(os.path.join(data_dir, 'ch2025_*.parquet'))
