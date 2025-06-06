@@ -1,9 +1,124 @@
 from typing import Optional, Union
 import torch
 import torch.nn as nn
+import timm
 
 from .AutoEncoder import FCAutoencoder, Conv1DAutoencoder
-from .Block import ResidualFCBlock, Conv1dBlock
+from .Block import ResidualFCBlock, Conv1dBlock, LearnablePositionalEncoding, SinusoidalPositionalEncoding, PerformerWithFFNBlock
+
+
+def init_except_autoencoder(m, act="GELU"):
+    # Autoencoder 모듈 제외
+    if isinstance(m, (FCAutoencoder, Conv1DAutoencoder)):
+        return
+    # Linear 초기화
+    if isinstance(m, nn.Linear) and act == "GELU":
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.Linear) and act == "ReLU":
+        nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    # LayerNorm 초기화
+    elif isinstance(m, nn.LayerNorm):
+        nn.init.ones_(m.weight)
+        nn.init.zeros_(m.bias)
+
+class EffNetTransformerEncoder(nn.Module):
+    def __init__(
+            self, 
+            model_name="efficientnet_b1",
+            seq_len=49, 
+            out_dim=256, 
+            act=nn.GELU, 
+            nhead=8, 
+            num_layers=3, 
+            use_learnable_pe=True):
+        
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=True)
+        self.backbone.reset_classifier(0)
+
+        self.proj = nn.Linear(self.backbone.num_features, out_dim)
+        self.pe = LearnablePositionalEncoding(seq_len=seq_len, dim=out_dim) if use_learnable_pe else SinusoidalPositionalEncoding(seq_len=seq_len, dim=out_dim)
+        
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=out_dim, nhead=nhead, activation=act,batch_first=True)
+        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(out_dim))
+
+    def forward(self, x:torch.Tensor):
+        x = self.backbone.forward_features(x)   #(B, 1280, 7, 7)
+        x = x.flatten(2).transpose(1, 2)        #(B, 49, 1280)
+        x = self.proj(x)                        #(B, 49, out_dim)
+        x = self.pe(x)                          #(B, 49, out_dim)
+        out = self.transformer(x).mean(dim=1)   #(B, 49, out_dim)
+        return out
+    
+class EffNetSimpleEncoder(nn.Module):
+    def __init__(self, 
+                 model_name="efficientnet_b1", 
+                 act=nn.GELU, 
+                 out_dim=128,
+                 dropout_ratio=0.1):
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=True)
+        self.backbone.reset_classifier(0)
+        self.proj = nn.Linear(self.backbone.num_features, out_dim)
+        self.act = act()
+        self.norm = nn.LayerNorm(out_dim)
+        self.dropout = nn.Dropout(p=dropout_ratio)
+
+    def forward(self, x:torch.Tensor):
+        x = self.backbone(x)
+        x = self.proj(x)
+        x = self.norm(x)
+        x = self.act(x)
+        out = self.dropout(x)
+        return out
+    
+
+try:
+    from performer_pytorch import SelfAttention
+except ImportError:
+    raise ImportError("Please install performer-pytorch: pip install performer-pytorch")
+
+class EffNetPerformerEncoder(nn.Module):
+    def __init__( 
+            self, 
+            model_name="efficientnet_b1",
+            seq_len=49, 
+            out_dim=256, 
+            nhead=8, 
+            act=nn.GELU, 
+
+            num_layers=3, 
+            dropout_ratio=0.1,
+            use_learnable_pe=True):
+        
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=True)
+        self.backbone.reset_classifier(0)
+        latent_dim = 4*out_dim  
+
+        self.proj = nn.Linear(self.backbone.num_features, out_dim)
+        self.pe = LearnablePositionalEncoding(seq_len=seq_len, dim=out_dim) if use_learnable_pe else SinusoidalPositionalEncoding(seq_len=seq_len, dim=out_dim)
+        
+        self.attn_blocks = nn.ModuleList([
+            PerformerWithFFNBlock(d_model=out_dim, heads=nhead, dim_feedforward=latent_dim, dropout=dropout_ratio, act=act)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, x:torch.Tensor):
+        x = self.backbone.forward_features(x)   #(B, 1280, 7, 7)
+        x = x.flatten(2).transpose(1, 2)        #(B, 49, 1280)
+        x = self.proj(x)                        #(B, 49, out_dim)
+        x = self.pe(x)                          #(B, 49, out_dim)
+        for attn_block in self.attn_blocks:     #(B, 49, out_dim)
+            x = attn_block(x)
+        
+        out = x.mean(dim=1)                     #(B, out_dim)
+        return out
+
 
 class ResidualFCEncoder(nn.Module):
     def __init__(
@@ -69,6 +184,7 @@ def _make_stage(in_ch:int,
     return nn.Sequential(*layers)
 
 
+
 class Conv1dEncoder(nn.Module): #Out Channel 64~128
     def __init__(
             self, 
@@ -106,15 +222,6 @@ class Conv1dEncoder(nn.Module): #Out Channel 64~128
             stage3, # t=6
             nn.AdaptiveAvgPool1d(1),   # t=6
         )
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity=act.__name__.lower())
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
 
     def forward(self, x):
         if self.ae is not None:
@@ -180,15 +287,6 @@ class TabTransformerEncoder(nn.Module): #TODO: AE의 구조를 조금 더 유연
 
         self.norm = nn.LayerNorm(dim)
         self.output_proj = nn.Linear(dim, dim)
-
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity=act.__name__.lower())
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
         
     def forward(self, x_input: torch.Tensor) -> torch.Tensor:
         B, F_orig = x_input.shape

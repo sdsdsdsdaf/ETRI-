@@ -12,3 +12,4 @@ test.py
 **/*.png
 **/*.pt
 /Img_samples/
+*.ipynb

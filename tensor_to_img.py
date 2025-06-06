@@ -388,7 +388,7 @@ with open("train_data_subset_5.pkl", 'wb') as f:
 # Run example
 process_all_samples(
     pkl_path="Data_Dict/train_data_filtered_daily_linear_ratio_mask.pkl",
-    save_dir="Img_samples",
+    save_dir="Img_Data/test",
     resize=(224, 224),
     img_save=False,
     debug = False
