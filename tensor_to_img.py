@@ -9,6 +9,11 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from io import BytesIO
 from matplotlib.collections import LineCollection
+from tqdm.auto import tqdm
+
+
+debug_list = []
+
 
 # ====================
 # Normalize with mask
@@ -66,19 +71,21 @@ def plot_modal_subplot_image(data_df: pd.DataFrame, mask_df: pd.DataFrame, resiz
         y_min = np.min(data)
         y_max = np.max(data)
 
+        '''
         if np.all(mask == 0):
             ax.set_facecolor("lightgray")
             ax.text(0.5, 0.5, "PADDED", color="red", fontsize=10,
                     ha="center", va="center", transform=ax.transAxes)
             ax.set_ylim(-1, 1)
-        elif np.isclose(y_min, y_max, atol=1e-10):
+        '''
+        if np.isclose(y_min, y_max, atol=1e-10):
             margin = 1e-2 if y_min == 0 else abs(y_min * 0.01)
             ax.set_ylim(y_min - margin, y_max + margin)
         else:
             ax.set_ylim(y_min, y_max)
 
         ax.axis('off')
-    print(f"[{col}] mask.sum(): {mask.sum()}, mask.shape: {mask.shape}, dtype: {mask.dtype}")
+    #print(f"[{col}] mask.sum(): {mask.sum()}, mask.shape: {mask.shape}, dtype: {mask.dtype}")
     
     buf = BytesIO()
     plt.tight_layout(pad=2.0)
@@ -110,12 +117,24 @@ def plot_modal_heatmap_image(data_df, mask_df, resize=(224, 224)) -> Image.Image
     alpha_stack = np.stack(alpha_list)    # (C, T)
 
     # RGBA 이미지로 변환
-    cmap = cm.get_cmap('viridis')
+    cmap = plt.colormaps['viridis']
     rgba = cmap((normed_stack - (-2)) / (2 - (-2))) 
     rgba[..., -1] = alpha_stack  # alpha 채널에 마스크 적용
 
     # Plot
     fig, ax = plt.subplots(figsize=(2, 2), dpi=100)
+    
+
+    '''
+    if np.all(mask==0):
+        # 🔻 전부 패딩인 경우 회색 배경 + "PADDED" 텍스트
+        ax.set_facecolor("lightgray")
+        ax.text(
+            0.5, 0.5, "PADDED", color="red", fontsize=10,
+            ha="center", va="center", transform=ax.transAxes
+        )
+    else:'''
+    
     ax.imshow(rgba, aspect='auto', interpolation='nearest')
     ax.axis('off')
 
@@ -166,20 +185,25 @@ def process_all_samples(
     pkl_path: str,
     save_dir: str,
     resize: Tuple[int, int] = (224, 224),
-    img_save: bool = False
+    img_save: bool = False,
+    debug = False
 ):
     with open(pkl_path, "rb") as f:
         data_dict = pickle.load(f)
 
     os.makedirs(save_dir, exist_ok=True)
 
-    for key, (sleep_dict, lifelog_dict) in data_dict.items():
+    print(f"Converting Data to Img...")
+    for key, (sleep_dict, lifelog_dict) in tqdm(data_dict.items(), leave=False):
         subject_id, sleep_date, lifelog_date = key
 
-
+        
         #디버그
-        df = sleep_dict['mLight'][1]
-        print(df.select_dtypes(include='number').sum())
+        none_sleep_mods_list = []
+        none_lifelog_mods_list = []
+        debug_log_lines = []
+
+
         for val in sleep_dict.values():
             if val and isinstance(val, tuple) and val[0] is not None:
                 T = len(val[0])
@@ -190,11 +214,13 @@ def process_all_samples(
         filled_sleep = {}
         filled_lifelog = {}
 
-        for mod in all_mods:
+        for mod in sleep_dict.keys():
             val_s = sleep_dict.get(mod)
             if val_s is None or not isinstance(val_s, tuple):
                 df = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
                 mask = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+                #디버그
+                none_sleep_mods_list.append(mod)
             else:
                 df, mask = val_s
             filled_sleep[mod] = (df, mask)
@@ -203,12 +229,81 @@ def process_all_samples(
             if val_l is None or not isinstance(val_l, tuple):
                 df = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
                 mask = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+                #디버그
+                none_lifelog_mods_list.append(mod)
             else:
                 df, mask = val_l
             filled_lifelog[mod] = (df, mask)
 
-        sample_dir = os.path.join(save_dir, f"{subject_id}_{sleep_date}_{lifelog_date}")
-        os.makedirs(sample_dir, exist_ok=True)
+        '''
+        # ✅ 디버깅: None 처리된 SLEEP 모달리티의 실제 데이터 유무 검사
+        for mod in set(none_sleep_mods_list):
+            try:
+                df = pd.read_csv(f'Data/PreProcessingData/{mod}_daily_linear_ratio_mask_interpolates.csv')
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+                # subject_id와 date 기준 필터링
+                df['date'] = df['timestamp'].dt.date
+                df_subject = df[df['subject_id'] == subject_id]
+
+                target_date = pd.to_datetime(sleep_date).date()
+                has_data = target_date in df_subject['date'].values
+
+                if has_data:
+                    debug_log_lines.append(
+                        f"[{subject_id}] [SLEEP] {mod} ⛔ None 처리됐지만 실제 {sleep_date} 데이터 있음"
+                    )
+                else:
+                    debug_log_lines.append(
+                        f"[{subject_id}] [SLEEP] {mod} ✅ 실제로 {sleep_date}에 데이터 없음"
+                    )
+            except FileNotFoundError:
+                debug_log_lines.append(
+                    f"[{subject_id}] [SLEEP] {mod} ⚠️ CSV 파일 없음"
+                )
+            except Exception as e:
+                debug_log_lines.append(
+                    f"[{subject_id}] [SLEEP] {mod} 🚨 오류 발생: {e}"
+                )
+
+        # ✅ 디버깅: None 처리된 LIFELOG 모달리티의 실제 데이터 유무 검사
+        for mod in set(none_lifelog_mods_list):
+            try:
+                df = pd.read_csv(f'Data/PreProcessingData/{mod}_daily_linear_ratio_mask_interpolates.csv')
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+                df['date'] = df['timestamp'].dt.date
+                df_subject = df[df['subject_id'] == subject_id]
+
+                target_date = pd.to_datetime(lifelog_date).date()
+                has_data = target_date in df_subject['date'].values
+
+                if has_data:
+                    debug_log_lines.append(
+                        f"[{subject_id}] [LIFELOG] {mod} ⛔ None 처리됐지만 실제 {lifelog_date} 데이터 있음"
+                    )
+                else:
+                    debug_log_lines.append(
+                        f"[{subject_id}] [LIFELOG] {mod} ✅ 실제로 {lifelog_date}에 데이터 없음"
+                    )
+            except FileNotFoundError:
+                debug_log_lines.append(
+                    f"[{subject_id}] [LIFELOG] {mod} ⚠️ CSV 파일 없음"
+                )
+            except Exception as e:
+                debug_log_lines.append(
+                    f"[{subject_id}] [LIFELOG] {mod} 🚨 오류 발생: {e}"
+                )
+
+
+
+        # 로그 저장
+        debug_dir = os.path.join(save_dir, "debug_logs")
+        os.makedirs(debug_dir, exist_ok=True)
+        log_path = os.path.join(debug_dir, f"{subject_id}_{sleep_date}_debug_log.txt")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(debug_log_lines))'''
+
 
         images_plot_sleep, images_heat_sleep = [], []
         images_plot_lifelog, images_heat_lifelog = [], []
@@ -220,6 +315,8 @@ def process_all_samples(
             img_heat = plot_modal_heatmap_image(df, mask, resize)
 
             if img_save:
+                sample_dir = os.path.join(save_dir, f"{subject_id}_{sleep_date}_{lifelog_date}")
+                os.makedirs(sample_dir, exist_ok=True)
                 img_plot.save(os.path.join(sample_dir, f"sleep_{modality}_plot.png"))
                 img_heat.save(os.path.join(sample_dir, f"sleep_{modality}_heatmap.png"))
 
@@ -269,18 +366,30 @@ def process_all_samples(
         file_name = f"{subject_id}_{sleep_date}_{lifelog_date}.pt"
         torch.save(meta, os.path.join(save_dir, file_name))
 
+        '''
         none_sleep_mods = get_none_modalities(sleep_dict)
         none_lifelog_mods = get_none_modalities(lifelog_dict)
 
         print("❌ None sleep modalities:", none_sleep_mods)
         print("❌ None lifelog modalities:", none_lifelog_mods)
+        '''
 
+    print("Complete converting")
+
+with open("Data_Dict/train_data_filtered_daily_linear_ratio_mask.pkl", 'rb') as f:
+    data_dict = pickle.load(f)
+
+data_dict_5_samples = {k: data_dict[k] for k in list(data_dict.keys())[:10]}
+
+with open("train_data_subset_5.pkl", 'wb') as f:
+    pickle.dump(data_dict_5_samples, f)
 
 
 # Run example
 process_all_samples(
-    pkl_path="train_data_subset_5.pkl",
+    pkl_path="Data_Dict/train_data_filtered_daily_linear_ratio_mask.pkl",
     save_dir="Img_samples",
     resize=(224, 224),
-    img_save=True
+    img_save=False,
+    debug = False
 )

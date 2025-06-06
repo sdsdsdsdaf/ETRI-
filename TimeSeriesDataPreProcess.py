@@ -69,7 +69,7 @@ def process_mBle(df:pd.DataFrame):
                 rssi = int(device['rssi'])
                 rssi_list.append(rssi)
 
-                if str(device['device_class']) == 0:
+                if str(device['device_class']) == '0':
                     class_0_cnt += 1
                 else:
                     class_other_cnt += 1
@@ -821,7 +821,6 @@ def data_load_and_split_test_and_train( #TODO threshhold=0.3, continuous_time=18
                                     is_continuous=is_continuous)
     
     reorganized_result = reorganize_by_subject_date(interpolated_results)
-
     print("📦 [train_dict] 생성 중 (tqdm)...")
     '''
     train_dict = {k: (get_data_by_key(reorganized_result, (k[0], k[1])), 
@@ -956,6 +955,7 @@ if __name__ == "__main__":
     is_continuous = True
     mask_type = 'ratio_mask' if is_continuous else 'bit_mask'
     daliy_or_all_day = "daily" if is_daliy else "all_day"
+    save_csv = True
 
     train_x_file_name =f"train_data_{daliy_or_all_day}_{method}_{mask_type}.pkl"
     train_y_file_name = f"train_label_{daliy_or_all_day}_{method}_{mask_type}.pkl"
@@ -978,7 +978,7 @@ if __name__ == "__main__":
         print(f'{daliy_or_all_day}_{method}_{mask_type} Data Not Found')
         print(f'Create {daliy_or_all_day}_{method}_{mask_type} Data')
 
-        train_data, train_label, test_data, test_label = data_load_and_split_test_and_train(save_csv=True, is_continuous=is_continuous)
+        train_data, train_label, test_data, test_label = data_load_and_split_test_and_train(save_csv=save_csv, is_continuous=is_continuous)
         with open(train_x_file_path, 'wb') as f:
             pkl.dump(train_data, f)
         with open(train_y_file_path, 'wb') as f:

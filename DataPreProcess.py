@@ -15,8 +15,8 @@ MultiModal_data_list = ['mACStatus', 'mActivity', 'mAmbience', 'mBle', 'mGps', '
 
 MultiModal_data_with_time = ['mGps', 'mLight', 'mScreenStatus', 'wHr', 'wLight', 'wPedo']
 
-metrics_train = pd.read_csv('Data\ch2025_metrics_train.csv')
-sample_submission = pd.read_csv('Data\ch2025_submission_sample.csv')
+metrics_train = pd.read_csv(os.path.join('Data', 'ch2025_metrics_train.csv'))
+sample_submission = pd.read_csv(os.path.join('Data', 'ch2025_submission_sample.csv'))
 
 top_10_labels = [
     "Inside, small room", "Speech", "Silence", "Music",
@@ -53,7 +53,7 @@ def preprocess_data(df: pd.DataFrame, timestamp_col: str = 'timestamp', SD: Opti
         np.random.seed(SD)
         os.environ['PYTHONHASHSEED'] = str(SD)
 
-    data_dir = "Data\ch2025_data_items"
+    data_dir = os.path.join('Data','ch2025_data_items')
 
     # Parquet 파일 전체 경로 리스트
     parquet_files = glob.glob(os.path.join(data_dir, 'ch2025_*.parquet'))

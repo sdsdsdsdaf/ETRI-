@@ -10,3 +10,5 @@ test.py
 *test.py
 *test2.py
 **/*.png
+**/*.pt
+/Img_samples/
