@@ -1,10 +1,15 @@
 import pickle
 
-with open("Data_Dict/train_data_filtered_daily_linear_bit_mask.pkl", "rb") as f:
-    full_data = pickle.load(f)
+class LifelogDataset:
+    def __init__(self, pkl_path):
+        with open(pkl_path, 'rb') as f:
+            self.data = pickle.load(f)
+        self.keys = list(self.data.keys())
 
-ten_keys = list(full_data.keys())[:1]
-ten_samples = {k: full_data[k] for k in ten_keys}
+    def __len__(self):
+        return len(self.keys)
 
-with open("ten_samples.pkl", "wb") as f:
-    pickle.dump(ten_samples, f)
+    def __getitem__(self, idx):
+        key = self.keys[idx]
+        sleep_dict, lifelog_dict = self.data[key]
+        return key, sleep_dict, lifelog_dict

@@ -2,14 +2,19 @@ import torch
 import torch.nn as nn
 from typing import Optional, Union
 
-from .Encoder import ResidualFCEncoder, Conv1dEncoder, TabTransformerEncoder
+from .Encoder import ResidualFCEncoder, EffNetTransformerEncoder, EffNetSimpleEncoder, EffNetPerformerEncoder
+
+
 
 def get_ae(ae_dict, key):
     return ae_dict[key] if ae_dict and key in ae_dict else None
 
 class MultimodalModel(nn.Module):
     def __init__(self,
-                 in_feature_dict: dict = None,
+                 mBle_in = 5,
+                 img_size = 224,
+                 CNNEncoder = EffNetTransformerEncoder,
+                 CNN_hyper_dict = None,
                  out_feature: int = 128,
                  encoder_dict: dict = None, 
                  ae_dict: nn.ModuleDict = None,
@@ -17,7 +22,7 @@ class MultimodalModel(nn.Module):
                  proj_dim: int = 128,
                  fc_expand_feature: int = 128,
                  dropout_ratio: float = 0.3,
-                 act=nn.ReLU,
+                 act=nn.GELU,
                  hidden_layer_list:Optional[list[int]] = [128]):
         """
         encoder_dict: Dictionary mapping modality name to its encoder (nn.Module). 
@@ -28,21 +33,47 @@ class MultimodalModel(nn.Module):
         super().__init__()
 
         assert fusion in ['concat', 'attention', 'projection'], f"Unsupported fusion type: {fusion}"
-        assert not len(in_feature_dict) == 0, "in_feature_dict must be provided"
+        if CNN_hyper_dict == None:
+            CNN_hyper_dict = {}
+
+        CNN_hyper_dict['out_dim'] = out_feature
+        CNN_hyper_dict['model_name'] = 'mo'
 
         if encoder_dict is None:
+            encoder_config = {
+            'mAmbience': ("mobilenetv3_small_050", 128),
+            'mGps':      ("mobilenetv3_small_050", 128),
+            'mLight':    ("mobilenetv3_small_050", 128),
+            'mScreenStatus': ("mobilenetv3_small_050", 128),
+            'mUsageStats':   ("mobilenetv3_small_050", 128),
+            'mWifi':     ("mobilenetv3_small_050", 128),
+            'wHr':       ("mobilenetv3_small_050", 128),
+            'wLight':    ("mobilenetv3_small_050", 128),
+            'wPedo':     ("mobilenetv3_small_050", 128),
+            'mActivity': ("mobilenetv3_small_050", 128),
+            'mACStatus': ("mobilenetv3_small_050", 128),
+            'mAppUsage': ("mobilenetv3_small_050", 128),
+        }
+
+            # 2. encoder_dict 생성 (공통 파라미터는 고정)
             encoder_dict = {
-                'mAmbience': ResidualFCEncoder(in_feature=in_feature_dict['mAmbience'], hidden_layer_list=hidden_layer_list,act=act, dropout_ratio=dropout_ratio, out_feature=out_feature, ae=get_ae(ae_dict, 'mAmbience')),
-                'mBle': ResidualFCEncoder(in_feature=in_feature_dict['mBle'], hidden_layer_list=hidden_layer_list, expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, out_feature=out_feature, ae=get_ae(ae_dict, 'mBle')),
-                'mGps': Conv1dEncoder(in_ch=in_feature_dict['mGps'], out_ch=out_feature, ae=get_ae(ae_dict, 'mGps'), act=act),
-                'mLight': ResidualFCEncoder(in_feature=in_feature_dict['mLight'], hidden_layer_list=hidden_layer_list, out_feature=out_feature, expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, ae=get_ae(ae_dict, 'mLight')),
-                'mScreenStatus': ResidualFCEncoder(in_feature=in_feature_dict['mScreenStatus'], hidden_layer_list=hidden_layer_list, out_feature=out_feature, expand_feature=fc_expand_feature, act=act, dropout_ratio=dropout_ratio, ae=get_ae(ae_dict, 'mScreenStatus')),
-                'mUsageStats': TabTransformerEncoder(num_features=in_feature_dict['mUsageStats'], dim=out_feature, ae=get_ae(ae_dict, 'mUsageStats')),
-                'mWifi': ResidualFCEncoder(in_feature=in_feature_dict['mWifi'], out_feature=out_feature, hidden_layer_list=hidden_layer_list, act=act, dropout_ratio=dropout_ratio, ae=get_ae(ae_dict, 'mWifi')),
-                'wHr': Conv1dEncoder(in_ch=in_feature_dict['wHr'], out_ch=out_feature, act=act, ae=get_ae(ae_dict, 'wHr')),
-                'wLight': Conv1dEncoder(in_ch=in_feature_dict['wLight'], out_ch=out_feature, act=act,ae=get_ae(ae_dict, 'wLight')),
-                'wPedo': Conv1dEncoder(in_ch=in_feature_dict['wPedo'], out_ch=out_feature, act=act, ae=get_ae(ae_dict, 'wPedo')),
+                modal: CNNEncoder(
+                    model_name=model_name,
+                    out_dim=out_dim,
+                    act=ae_dict,
+                )
+                for modal, (model_name, out_dim) in encoder_config.items()
             }
+
+            encoder_dict['mBle'] = ResidualFCEncoder(
+                in_feature=mBle_in,
+                hidden_layer_list=hidden_layer_list,
+                expand_feature=fc_expand_feature,
+                out_feature=out_feature,
+                act=act,
+                dropout_ratio=dropout_ratio,
+                ae=None
+            )
             
         self.encoders = nn.ModuleDict(encoder_dict)
         self.fusion_type = fusion

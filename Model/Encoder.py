@@ -90,7 +90,6 @@ class EffNetPerformerEncoder(nn.Module):
             out_dim=256, 
             nhead=8, 
             act=nn.GELU, 
-
             num_layers=3, 
             dropout_ratio=0.1,
             use_learnable_pe=True):
@@ -118,6 +117,7 @@ class EffNetPerformerEncoder(nn.Module):
         
         out = x.mean(dim=1)                     #(B, out_dim)
         return out
+
 
 
 class ResidualFCEncoder(nn.Module):

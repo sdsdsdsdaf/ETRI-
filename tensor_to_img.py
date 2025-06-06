@@ -346,8 +346,10 @@ def process_all_samples(
         tensor_plot_lifelog = image_to_tensor(merged_plot_lifelog)
         tensor_heat_lifelog = image_to_tensor(merged_heat_lifelog)
 
-        mBle_tensor_sleep = torch.tensor(sleep_dict['mBle'][0].values.T)
-        mBle_tensor_lifelog = torch.tensor(lifelog_dict['mBle'][1].values.T)
+        mBle_tensor_sleep = (torch.tensor(sleep_dict['mBle'][0].values.T), 
+                             torch.tensor(sleep_dict['mBle'][1].values.T))
+        mBle_tensor_lifelog = (torch.tensor(lifelog_dict['mBle'][0].values.T), 
+                               torch.tensor(lifelog_dict['mBle'][1].values.T))
 
         meta = {
             "mBle_tensor_sleep": mBle_tensor_sleep,
