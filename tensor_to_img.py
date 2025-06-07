@@ -1,6 +1,5 @@
 import os
 import pickle
-from matplotlib import cm
 import numpy as np
 import pandas as pd
 from typing import Tuple, List, Dict
@@ -10,14 +9,41 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 from matplotlib.collections import LineCollection
 from tqdm.auto import tqdm
+import h5py
 
-
-debug_list = []
 
 
 # ====================
 # Normalize with mask
 # ====================
+
+
+def normalize_batch_tensor(t: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize (N, C, H, W) image tensor using ImageNet statistics
+    """
+    mean = torch.tensor([0.485, 0.456, 0.406], device=t.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=t.device).view(1, 3, 1, 1)
+    return (t - mean) / std
+
+def save_as_h5(meta: dict, save_path: str):
+    with h5py.File(save_path, "w") as f:
+        # 주요 텐서 저장
+        f.create_dataset("tensor_plot_sleep", data=meta["tensor_plot_sleep"].numpy())
+        f.create_dataset("tensor_heatmap_sleep", data=meta["tensor_heatmap_sleep"].numpy())
+        f.create_dataset("tensor_plot_lifelog", data=meta["tensor_plot_lifelog"].numpy())
+        f.create_dataset("tensor_heatmap_lifelog", data=meta["tensor_heatmap_lifelog"].numpy())
+        f.create_dataset("mble_data_sleep", data=meta["mBle_tensor_sleep"].numpy())
+        f.create_dataset("mble_data_lifelog", data=meta["mBle_tensor_lifelog"].numpy())
+        f.create_dataset("label", data=meta["label"].numpy())
+
+        # 메타데이터는 속성으로 저장
+        f.attrs["subject_id"] = meta["subject_id"]
+        f.attrs["sleep_date"] = meta["sleep_date"]
+        f.attrs["lifelog_date"] = meta["lifelog_date"]
+        f.attrs["resize"] = meta["resize"]
+        f.attrs["modality_names"] = np.array(meta["modality_names"], dtype="S")
+
 def normalize_df_with_mask(data: np.ndarray, mask: np.ndarray, eps: float = 1e-8):
     masked = data[mask == 1]
     if len(masked) == 0:
@@ -149,8 +175,19 @@ def plot_modal_heatmap_image(data_df, mask_df, resize=(224, 224)) -> Image.Image
 # ====================
 # Convert PIL Image to torch Tensor
 # ====================
-def image_to_tensor(image: Image.Image) -> torch.Tensor:
-    return torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
+def image_to_tensor(images: List[Image.Image]) -> torch.Tensor:
+    """
+    Args:
+        images: list of PIL Image 객체들
+
+    Returns:
+        torch.Tensor: (N, 3, 224, 224)
+    """
+    tensor_list = [
+        torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+        for img in images
+    ]
+    return torch.stack(tensor_list, dim=0)  # (N, 3, 224, 224)
 
 # ====================
 # Merge a list of images vertically
@@ -186,10 +223,14 @@ def process_all_samples(
     save_dir: str,
     resize: Tuple[int, int] = (224, 224),
     img_save: bool = False,
-    debug = False
+    debug = False,
+    save_method = "h5",
+    label_path = None
 ):
     with open(pkl_path, "rb") as f:
         data_dict = pickle.load(f)
+    with open(label_path, "rb") as f:
+        label_dict = pickle.load(f)
 
     os.makedirs(save_dir, exist_ok=True)
 
@@ -203,22 +244,16 @@ def process_all_samples(
         none_lifelog_mods_list = []
         debug_log_lines = []
 
-
-        for val in sleep_dict.values():
-            if val and isinstance(val, tuple) and val[0] is not None:
-                T = len(val[0])
-                time_values = val[0]["date"]
-                break
-
         all_mods = list(set(sleep_dict.keys()) | set(lifelog_dict.keys()))
         filled_sleep = {}
         filled_lifelog = {}
+        T=5
 
         for mod in sleep_dict.keys():
             val_s = sleep_dict.get(mod)
             if val_s is None or not isinstance(val_s, tuple):
-                df = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
-                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+                df = pd.DataFrame({f"{mod}_pad": np.zeros(T)})
+                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T)})
                 #디버그
                 none_sleep_mods_list.append(mod)
             else:
@@ -227,8 +262,18 @@ def process_all_samples(
 
             val_l = lifelog_dict.get(mod)
             if val_l is None or not isinstance(val_l, tuple):
-                df = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
-                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T), "date": time_values})
+                df = pd.DataFrame({f"{mod}_pad": np.zeros(T)})
+                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T)})
+                #디버그
+                none_lifelog_mods_list.append(mod)
+            else:
+                df, mask = val_l
+            filled_lifelog[mod] = (df, mask)
+
+            val_l = lifelog_dict.get(mod)
+            if val_l is None or not isinstance(val_l, tuple):
+                df = pd.DataFrame({f"{mod}_pad": np.zeros(T)})
+                mask = pd.DataFrame({f"{mod}_pad": np.zeros(T)})
                 #디버그
                 none_lifelog_mods_list.append(mod)
             else:
@@ -336,20 +381,18 @@ def process_all_samples(
             images_plot_lifelog.append(img_plot)
             images_heat_lifelog.append(img_heat)
 
-        merged_plot_sleep = merge_images_vertically(images_plot_sleep)
-        merged_heat_sleep = merge_images_vertically(images_heat_sleep)
-        merged_plot_lifelog = merge_images_vertically(images_plot_lifelog)
-        merged_heat_lifelog = merge_images_vertically(images_heat_lifelog)
 
-        tensor_plot_sleep = image_to_tensor(merged_plot_sleep)
-        tensor_heat_sleep = image_to_tensor(merged_heat_sleep)
-        tensor_plot_lifelog = image_to_tensor(merged_plot_lifelog)
-        tensor_heat_lifelog = image_to_tensor(merged_heat_lifelog)
+        tensor_plot_sleep = normalize_batch_tensor(image_to_tensor(images_plot_sleep))
+        tensor_heat_sleep = normalize_batch_tensor(image_to_tensor(images_heat_sleep))
+        tensor_plot_lifelog = normalize_batch_tensor(image_to_tensor(images_plot_lifelog))
+        tensor_heat_lifelog = normalize_batch_tensor(image_to_tensor(images_heat_lifelog))
 
-        mBle_tensor_sleep = (torch.tensor(sleep_dict['mBle'][0].values.T), 
-                             torch.tensor(sleep_dict['mBle'][1].values.T))
-        mBle_tensor_lifelog = (torch.tensor(lifelog_dict['mBle'][0].values.T), 
-                               torch.tensor(lifelog_dict['mBle'][1].values.T))
+        mBle_tensor_sleep = torch.cat([torch.tensor(filled_sleep['mBle'][0].values.T).flatten(), 
+                             torch.tensor(filled_sleep['mBle'][1].values.T).flatten()], dim=0)
+        mBle_tensor_lifelog = torch.cat([torch.tensor(filled_lifelog['mBle'][0].values.T).flatten(), 
+                               torch.tensor(filled_lifelog['mBle'][1].values.T).flatten()], dim=0)
+
+        label_list = torch.Tensor(list(label_dict[key].values()))
 
         meta = {
             "mBle_tensor_sleep": mBle_tensor_sleep,
@@ -358,15 +401,16 @@ def process_all_samples(
             "tensor_heatmap_sleep": tensor_heat_sleep,
             "tensor_plot_lifelog": tensor_plot_lifelog,
             "tensor_heatmap_lifelog": tensor_heat_lifelog,
+            "label": label_list,
             "subject_id": subject_id,
             "sleep_date": str(sleep_date),
             "lifelog_date": str(lifelog_date),
             "modality_names": all_mods,
-            "resize": resize
+            "resize": resize,
         }
 
-        file_name = f"{subject_id}_{sleep_date}_{lifelog_date}.pt"
-        torch.save(meta, os.path.join(save_dir, file_name))
+        file_name = f"{subject_id}_{sleep_date}_{lifelog_date}.{save_method}"
+        save_as_h5(meta, os.path.join(save_dir, file_name))
 
         '''
         none_sleep_mods = get_none_modalities(sleep_dict)
@@ -390,8 +434,15 @@ with open("train_data_subset_5.pkl", 'wb') as f:
 # Run example
 process_all_samples(
     pkl_path="Data_Dict/train_data_filtered_daily_linear_ratio_mask.pkl",
-    save_dir="Img_Data/test",
+    label_path = "Data_Dict/train_label_daily_linear_ratio_mask.pkl",
+    save_dir="Img_Data/train",
     resize=(224, 224),
     img_save=False,
     debug = False
 )
+
+import torch, numpy
+print(torch.__version__)
+print(torch.cuda.is_available())
+print(torch.__file__)
+print(numpy.__file__)

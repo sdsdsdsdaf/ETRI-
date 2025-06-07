@@ -9,5 +9,6 @@ __pycache__/
 *test2.py
 **/*.png
 **/*.pt
+**/*.h5
 /Img_samples/
 *.ipynb

@@ -11,85 +11,69 @@ def get_ae(ae_dict, key):
 
 class MultimodalModel(nn.Module):
     def __init__(self,
-                 mBle_in = 5,
-                 img_size = 224,
-                 CNNEncoder = EffNetTransformerEncoder,
-                 CNN_hyper_dict = None,
-                 out_feature: int = 128,
-                 encoder_dict: dict = None, 
+                 mBle_in=10,
+                 img_size=224,
+                 encoder_dict: dict = None,  # ✅ 실제 nn.ModuleDict
+                 encoder_config: dict = None,  # ✅ (class, kwargs) 형식
+                 out_feature: int = 256,
                  ae_dict: nn.ModuleDict = None,
-                 fusion: str = 'projection', 
-                 proj_dim: int = 128,
+                 fusion: str = 'projection',
+                 proj_dim: int = 256,
                  fc_expand_feature: int = 128,
                  dropout_ratio: float = 0.3,
                  act=nn.GELU,
-                 hidden_layer_list:Optional[list[int]] = [128]):
-        """
-        encoder_dict: Dictionary mapping modality name to its encoder (nn.Module). 
-                      If None, a default encoder_dict will be constructed.
-        fusion: One of ['concat', 'attention', 'projection']
-        proj_dim: If fusion is 'projection', output dim of each modality projection
-        """
+                 hidden_layer_list: Optional[list[int]] = [128]):
         super().__init__()
-
         assert fusion in ['concat', 'attention', 'projection'], f"Unsupported fusion type: {fusion}"
-        if CNN_hyper_dict == None:
-            CNN_hyper_dict = {}
+        self.batchNorm = nn.BatchNorm1d(mBle_in)
 
-        CNN_hyper_dict['out_dim'] = out_feature
-        CNN_hyper_dict['model_name'] = 'mo'
-
+        # ✅ encoder_dict가 없으면 encoder_config를 우선 사용
         if encoder_dict is None:
-            encoder_config = {
-            'mAmbience': ("mobilenetv3_small_050", 128),
-            'mGps':      ("mobilenetv3_small_050", 128),
-            'mLight':    ("mobilenetv3_small_050", 128),
-            'mScreenStatus': ("mobilenetv3_small_050", 128),
-            'mUsageStats':   ("mobilenetv3_small_050", 128),
-            'mWifi':     ("mobilenetv3_small_050", 128),
-            'wHr':       ("mobilenetv3_small_050", 128),
-            'wLight':    ("mobilenetv3_small_050", 128),
-            'wPedo':     ("mobilenetv3_small_050", 128),
-            'mActivity': ("mobilenetv3_small_050", 128),
-            'mACStatus': ("mobilenetv3_small_050", 128),
-            'mAppUsage': ("mobilenetv3_small_050", 128),
-        }
+            encoder_dict = {}
 
-            # 2. encoder_dict 생성 (공통 파라미터는 고정)
-            encoder_dict = {
-                modal: CNNEncoder(
-                    model_name=model_name,
-                    out_dim=out_dim,
-                    act=ae_dict,
-                )
-                for modal, (model_name, out_dim) in encoder_config.items()
-            }
+            if encoder_config is not None:
+                # 🔹 Optuna 설정 기반: (encoder_class, kwargs)
+                for modal, (encoder_class, kwargs) in encoder_config.items():
+                    encoder_dict[modal] = encoder_class(**kwargs)
+            else:
+                # 🔹 Baseline 설정: 모두 동일한 CNN encoder 사용
+                default_modalities = [
+                    'mAmbience', 'mGps', 'mLight', 'mScreenStatus', 'mUsageStats', 'mWifi',
+                    'wHr', 'wLight', 'wPedo', 'mActivity', 'mACStatus', 'mBle'
+                ]
+                for modal in default_modalities:
+                    encoder_dict[modal] = EffNetSimpleEncoder(
+                        model_name="mobilenetv3_small_050",
+                        out_dim=out_feature,
+                        act=act,
+                        dropout_ratio=dropout_ratio
+                    )
 
-            encoder_dict['mBle'] = ResidualFCEncoder(
+            # 🔹 mBle는 항상 ResidualFCEncoder 사용
+            encoder_dict["mBle"] = ResidualFCEncoder(
                 in_feature=mBle_in,
                 hidden_layer_list=hidden_layer_list,
-                expand_feature=fc_expand_feature,
                 out_feature=out_feature,
                 act=act,
                 dropout_ratio=dropout_ratio,
-                ae=None
+                ae=ae_dict
             )
-            
+
         self.encoders = nn.ModuleDict(encoder_dict)
         self.fusion_type = fusion
 
         if fusion == 'projection':
             self.projections = nn.ModuleDict({
-                name: nn.Linear(encoder.out_features, proj_dim)
+                name: nn.Linear(out_feature, proj_dim)
                 for name, encoder in self.encoders.items()
             })
             self.shared_dim = proj_dim
 
         elif fusion == 'concat':
-            self.shared_dim = sum(encoder.out_features for encoder in self.encoders.values())
+            self.shared_dim = sum(out_feature for encoder in self.encoders.values())
 
         elif fusion == 'attention':
-            self.shared_dim = list(self.encoders.values())[0].out_features
+            self.shared_dim = out_feature * len(self.encoders)
             self.attention = nn.MultiheadAttention(embed_dim=self.shared_dim, num_heads=4, batch_first=True)
 
         else:
@@ -97,13 +81,19 @@ class MultimodalModel(nn.Module):
 
         self.shared_norm = nn.LayerNorm(self.shared_dim)
 
-    def forward(self, inputs: dict):
+    def forward(self, inputs, mBle_inputs=None, modal_listname=None):
         """
-        inputs: dict of {modality_name: tensor of shape (B, ...)}
+        
         """
+        modal_listname_list = [modal_listitem[0] for modal_listitem in modal_listname]
+        modal_listname_list.remove('mBle')
         encoded = {}
-        for name, x in inputs.items():
+        for idx, name in enumerate(modal_listname_list):
+            x = inputs[:,idx]
             encoded[name] = self.encoders[name](x)
+        
+        mBle_inputs = mBle_inputs.squeeze(1)
+        encoded['mBle'] = self.encoders['mBle'](self.batchNorm(mBle_inputs))
 
         if self.fusion_type == 'concat':
             fused = torch.cat([encoded[name] for name in self.encoders], dim=-1)

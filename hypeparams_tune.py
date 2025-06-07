@@ -1,12 +1,13 @@
 import torch
+from torch.amp import GradScaler, autocast
 import optuna
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.model_selection import KFold
-from your_encoder_module import suggest_encoder_config, build_encoder_dict
-from your_dataset import YourDataset
+from hyper_tune_auto import suggest_encoder_config, build_encoder_dict
+from LifelogDataset import H5LifelogDataset
 from model import ETRIHumanUnderstandModel  # Wraps encoders + heads
-from your_trainer import train_one_epoch, evaluate  # Define these separately
+from train import train_one_epoch, evaluate  # Define these separately
 
 modal_list = [
     'mGps', 'mAmbience', 'mLight', 'mScreenStatus',
@@ -25,17 +26,24 @@ def objective(trial):
     model = model.to(device)
 
     # === Step 3: Dataloader === #
-    train_loader = DataLoader(YourDataset(split="train"), batch_size=8, shuffle=True)
-    val_loader   = DataLoader(YourDataset(split="val"), batch_size=8)
+    train_loader = DataLoader(H5LifelogDataset(split="train"), batch_size=8, shuffle=True)
+    val_loader   = DataLoader(H5LifelogDataset(split="val"), batch_size=8)
 
     # === Step 4: Optimizer === #
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    scaler = torch.amp.GradScaler()
+    scaler = GradScaler()
 
     # === Step 5: Training === #
     best_val = -float("inf")
     for epoch in range(5):
-        train_one_epoch(model, train_loader, optimizer, scaler)
+        train_one_epoch(
+            model=model, 
+            epoch=epoch, 
+            num_epochs=5, 
+            train_loader=train_loader, 
+            optimizer=optimizer, 
+            scaler=scaler)
+        
         val_metric = evaluate(model, val_loader)  # e.g. accuracy or R^2
 
         if val_metric > best_val:

@@ -12,22 +12,13 @@ class GatingNetwork(nn.Module):
         return self.softmax(logits)
 
 class Expert(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, act = nn.ReLU):
+    def __init__(self, input_dim, hidden_dim=64, act = nn.GELU):
         super().__init__()
         self.layer = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             act(),
             nn.Linear(hidden_dim, input_dim)
         )
-        
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity=act.__name__.lower())
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
 
     def forward(self, x):  # x: (B, D)
         return self.layer(x)
@@ -38,7 +29,7 @@ class MoE(nn.Module): #Input: (B, D), Output: (B, D)
                  num_experts: int = 3,
                  gating_network: nn.Module = None,
                  experts: nn.ModuleList = None,
-                 act=nn.ReLU):
+                 act=nn.GELU):
         super().__init__()
 
         if gating_network is None:
