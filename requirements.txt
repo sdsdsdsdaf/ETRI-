@@ -5,7 +5,7 @@ h5py==3.14.0
 ipython==8.12.3
 iterative_stratification==0.1.9
 matplotlib==3.7.2
-numpy==2.3.0
+numpy==1.26.0
 optuna==4.3.0
 pandas==2.3.0
 performer_pytorch==1.1.4
