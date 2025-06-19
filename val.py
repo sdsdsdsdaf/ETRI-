@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import packaging
 import torch
 import torch.nn as nn
 from sklearn.model_selection import KFold
@@ -8,8 +9,22 @@ from torch.utils.data import DataLoader, Subset
 from util.EarlyStopping import EarlyStopping
 from model import ETRIHumanUnderstandModel
 from util.LifelogDataset import H5LifelogDataset
-from train import get_param_groups, train, evaluate, get_all_labels, get_class_weights
+from train import get_param_groups, train, evaluate, get_all_labels, get_class_weights, maybe_compile_model
 from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+
+def maybe_compile_model(model):
+    try:
+        # PyTorch 버전 확인
+        version = packaging.version.parse(torch.__version__.split("+")[0])
+        if version >= packaging.version.parse("2.0.0") and hasattr(torch, "compile"):
+            # torch.compile이 사용 가능한 경우
+            model = torch.compile(model)
+            print(f"Applied torch.compile on PyTorch {torch.__version__}")
+        else:
+            print(f"Skipping torch.compile: PyTorch {torch.__version__} does not support it")
+    except Exception as e:
+        print(f"Could not apply torch.compile: {e}")
+    return model
 
 def run_kfold_cross_validation(
     early_stopping=None,
