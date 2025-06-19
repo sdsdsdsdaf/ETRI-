@@ -3,6 +3,8 @@ import torch.nn as nn
 from typing import Optional, Union
 
 from .Encoder import ResidualFCEncoder, EffNetTransformerEncoder, EffNetSimpleEncoder, EffNetPerformerEncoder
+from .Block import PerformerWithFFNBlock as Perfo
+
 
 
 
@@ -13,8 +15,10 @@ class MultimodalModel(nn.Module):
     def __init__(self,
                  mBle_in=10,
                  img_size=224,
-                 encoder_dict: dict = None,  # ✅ 실제 nn.ModuleDict
-                 encoder_config: dict = None,  # ✅ (class, kwargs) 형식
+                 base_model = None,
+                 base_block = EffNetSimpleEncoder,
+                 encoder_dict: dict = None,  
+                 encoder_config: dict = None,  
                  out_feature: int = 256,
                  ae_dict: nn.ModuleDict = None,
                  fusion: str = 'projection',
@@ -26,6 +30,9 @@ class MultimodalModel(nn.Module):
         super().__init__()
         assert fusion in ['concat', 'attention', 'projection'], f"Unsupported fusion type: {fusion}"
         self.batchNorm = nn.BatchNorm1d(mBle_in)
+        if base_model is None:
+            base_model = "mobilenetv3_small_100"
+
 
         # ✅ encoder_dict가 없으면 encoder_config를 우선 사용
         if encoder_dict is None:
@@ -39,14 +46,13 @@ class MultimodalModel(nn.Module):
                 # 🔹 Baseline 설정: 모두 동일한 CNN encoder 사용
                 default_modalities = [
                     'mAmbience', 'mGps', 'mLight', 'mScreenStatus', 'mUsageStats', 'mWifi',
-                    'wHr', 'wLight', 'wPedo', 'mActivity', 'mACStatus', 'mBle'
+                    'wHr', 'wLight', 'wPedo', 'mActivity', 'mACStatus'
                 ]
                 for modal in default_modalities:
-                    encoder_dict[modal] = EffNetSimpleEncoder(
-                        model_name="mobilenetv3_small_050",
+                    encoder_dict[modal] = base_block(
+                        model_name=base_model,
                         out_dim=out_feature,
                         act=act,
-                        dropout_ratio=dropout_ratio
                     )
 
             # 🔹 mBle는 항상 ResidualFCEncoder 사용
@@ -73,8 +79,8 @@ class MultimodalModel(nn.Module):
             self.shared_dim = sum(out_feature for encoder in self.encoders.values())
 
         elif fusion == 'attention':
-            self.shared_dim = out_feature * len(self.encoders)
-            self.attention = nn.MultiheadAttention(embed_dim=self.shared_dim, num_heads=4, batch_first=True)
+            self.shared_dim = out_feature
+            self.attention = Perfo(d_model=self.shared_dim, nhead=4)
 
         else:
             raise ValueError(f"Unsupported fusion type: {fusion}")
@@ -105,7 +111,7 @@ class MultimodalModel(nn.Module):
 
         elif self.fusion_type == 'attention':
             tokens = torch.stack([encoded[name] for name in self.encoders], dim=1)
-            attn_out, _ = self.attention(tokens, tokens, tokens)
+            attn_out = self.attention(tokens)
             fused = attn_out.mean(dim=1)
 
         return self.shared_norm(fused)

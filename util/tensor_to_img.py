@@ -10,6 +10,8 @@ from io import BytesIO
 from matplotlib.collections import LineCollection
 from tqdm.auto import tqdm
 import h5py
+from scipy.ndimage import affine_transform
+import random
 
 
 
@@ -172,6 +174,7 @@ def plot_modal_heatmap_image(data_df, mask_df, resize=(224, 224)) -> Image.Image
     img = Image.open(buf).convert("RGB")
     return img.resize(resize)
 
+
 # ====================
 # Convert PIL Image to torch Tensor
 # ====================
@@ -189,7 +192,6 @@ def image_to_tensor(images: List[Image.Image]) -> torch.Tensor:
     ]
     return torch.stack(tensor_list, dim=0)  # (N, 3, 224, 224)
 
-# ====================
 # Merge a list of images vertically
 # ====================
 def merge_images_vertically(images: List[Image.Image]) -> Image.Image:
@@ -279,75 +281,6 @@ def process_all_samples(
             else:
                 df, mask = val_l
             filled_lifelog[mod] = (df, mask)
-
-        '''
-        # ✅ 디버깅: None 처리된 SLEEP 모달리티의 실제 데이터 유무 검사
-        for mod in set(none_sleep_mods_list):
-            try:
-                df = pd.read_csv(f'Data/PreProcessingData/{mod}_daily_linear_ratio_mask_interpolates.csv')
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-
-                # subject_id와 date 기준 필터링
-                df['date'] = df['timestamp'].dt.date
-                df_subject = df[df['subject_id'] == subject_id]
-
-                target_date = pd.to_datetime(sleep_date).date()
-                has_data = target_date in df_subject['date'].values
-
-                if has_data:
-                    debug_log_lines.append(
-                        f"[{subject_id}] [SLEEP] {mod} ⛔ None 처리됐지만 실제 {sleep_date} 데이터 있음"
-                    )
-                else:
-                    debug_log_lines.append(
-                        f"[{subject_id}] [SLEEP] {mod} ✅ 실제로 {sleep_date}에 데이터 없음"
-                    )
-            except FileNotFoundError:
-                debug_log_lines.append(
-                    f"[{subject_id}] [SLEEP] {mod} ⚠️ CSV 파일 없음"
-                )
-            except Exception as e:
-                debug_log_lines.append(
-                    f"[{subject_id}] [SLEEP] {mod} 🚨 오류 발생: {e}"
-                )
-
-        # ✅ 디버깅: None 처리된 LIFELOG 모달리티의 실제 데이터 유무 검사
-        for mod in set(none_lifelog_mods_list):
-            try:
-                df = pd.read_csv(f'Data/PreProcessingData/{mod}_daily_linear_ratio_mask_interpolates.csv')
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-
-                df['date'] = df['timestamp'].dt.date
-                df_subject = df[df['subject_id'] == subject_id]
-
-                target_date = pd.to_datetime(lifelog_date).date()
-                has_data = target_date in df_subject['date'].values
-
-                if has_data:
-                    debug_log_lines.append(
-                        f"[{subject_id}] [LIFELOG] {mod} ⛔ None 처리됐지만 실제 {lifelog_date} 데이터 있음"
-                    )
-                else:
-                    debug_log_lines.append(
-                        f"[{subject_id}] [LIFELOG] {mod} ✅ 실제로 {lifelog_date}에 데이터 없음"
-                    )
-            except FileNotFoundError:
-                debug_log_lines.append(
-                    f"[{subject_id}] [LIFELOG] {mod} ⚠️ CSV 파일 없음"
-                )
-            except Exception as e:
-                debug_log_lines.append(
-                    f"[{subject_id}] [LIFELOG] {mod} 🚨 오류 발생: {e}"
-                )
-
-
-
-        # 로그 저장
-        debug_dir = os.path.join(save_dir, "debug_logs")
-        os.makedirs(debug_dir, exist_ok=True)
-        log_path = os.path.join(debug_dir, f"{subject_id}_{sleep_date}_debug_log.txt")
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(debug_log_lines))'''
 
 
         images_plot_sleep, images_heat_sleep = [], []

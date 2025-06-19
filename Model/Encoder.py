@@ -2,10 +2,25 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 import timm
+import torch.nn.functional as F
 
 from .AutoEncoder import FCAutoencoder, Conv1DAutoencoder
 from .Block import ResidualFCBlock, LearnablePositionalEncoding, SinusoidalPositionalEncoding, PerformerWithFFNBlock
 
+
+def get_activation_function(act_module):
+    if act_module == nn.ReLU:
+        return F.relu
+    elif act_module == nn.GELU:
+        return F.gelu
+    elif act_module == nn.LeakyReLU:
+        return F.leaky_relu
+    elif act_module  == nn.Sigmoid:
+        return F.sigmoid
+    elif act_module == nn.Tanh:
+        return F.tanh
+    else:
+        return F.relu
 
 class EffNetTransformerEncoder(nn.Module):
     def __init__(
@@ -30,7 +45,7 @@ class EffNetTransformerEncoder(nn.Module):
         self.proj = nn.Linear(feature_dim, out_dim)
         self.pe = LearnablePositionalEncoding(seq_len=seq_len, dim=out_dim) if use_learnable_pe else SinusoidalPositionalEncoding(seq_len=seq_len, dim=out_dim)
         
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=out_dim, nhead=nhead, activation=act,batch_first=True)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=out_dim, nhead=nhead, activation=get_activation_function(act),batch_first=True)
         self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers, norm=nn.LayerNorm(out_dim))
 
     def forward(self, x:torch.Tensor):
@@ -102,7 +117,7 @@ class EffNetPerformerEncoder(nn.Module):
         self.pe = LearnablePositionalEncoding(seq_len=seq_len, dim=out_dim) if use_learnable_pe else SinusoidalPositionalEncoding(seq_len=seq_len, dim=out_dim)
         
         self.attn_blocks = nn.ModuleList([
-            PerformerWithFFNBlock(d_model=out_dim, heads=nhead, dim_feedforward=latent_dim, dropout=dropout_ratio, act=act)
+            PerformerWithFFNBlock(d_model=out_dim, nhead=nhead, dim_feedforward=latent_dim, dropout=dropout_ratio, act=act)
             for _ in range(num_layers)
         ])
 
@@ -126,12 +141,13 @@ class ResidualFCEncoder(nn.Module):
         out_feature:int,
         act=nn.ReLU, 
         dropout_ratio=0.3,
-        ae:Optional[Union[FCAutoencoder]]=None, 
+        ae:Optional[Union[FCAutoencoder]]=None,
+        use_bn = False,
         hidden_layer_list: Optional[list[int]] = None, # Autoencoder
     ):
         
         assert len(hidden_layer_list) % 3 == 1, "hidden_layer_list must be 3n + 1."
-
+        self.hidden_layer_list = hidden_layer_list.copy()
 
         super().__init__()
         self.ae = ae
@@ -139,20 +155,21 @@ class ResidualFCEncoder(nn.Module):
             in_feature = ae.out_features
 
         if hidden_layer_list is None:
-            hidden_layer_list = [128]
+            self.hidden_layer_list = [128]
 
-        hidden_layer_list.append(out_feature)  # 마지막 레이어는 out_feature로 설정
-        hidden_layer_list.insert(0, in_feature)  # 첫번째 레이어는 in_feature로 설정
+        self.hidden_layer_list.append(out_feature)  # 마지막 레이어는 out_feature로 설정
+        self.hidden_layer_list.insert(0, in_feature)  # 첫번째 레이어는 in_feature로 설정
         
         self.out_features = out_feature
         layers = []
-        for i in range(len(hidden_layer_list) // 3):
+        for i in range(len(self.hidden_layer_list) // 3):
             layers.append(
                 ResidualFCBlock(
-                    in_feature=hidden_layer_list[3*i], 
-                    out_feature=hidden_layer_list[3*i + 2], 
-                    expand_feature=hidden_layer_list[3*i + 1], 
-                    act=act, 
+                    in_feature=self.hidden_layer_list[3*i], 
+                    out_feature=self.hidden_layer_list[3*i + 2], 
+                    expand_feature=self.hidden_layer_list[3*i + 1], 
+                    act=act,
+                    use_bn=use_bn,
                     dropout_ratio=dropout_ratio
                 )
             )

@@ -48,20 +48,20 @@ class PerformerWithFFNBlock(nn.Module):
     
     def forward(self, src):                       # src (B, 49, d_model)
         # Self Attention + Residual + Norm
-        src2 = self.self_attn(src)                # (B, 49, d_model)
-        src = src + self.dropout1(src2)           # (B, 49, d_model)
-        src = self.norm1(src)                     # (B, 49, d_model)
-        
-        # Feed Forward Network + Residual + Norm
+        src2_input = self.norm1(src)
+        with torch.cuda.amp.autocast(enabled=False):
+            src2 = self.self_attn(src2_input.float())
+            src2 = torch.nan_to_num(src2, nan=0.0, posinf=1.0, neginf=-1.0)
+        src = src + self.dropout1(src2.type_as(src))
+
         src2 = self.linear2(
             self.dropout2(
                 self.activation(
-                    self.linear1(src))))          # (B, 49, d_model)
-        
-        
-        src = src + self.dropout3(src2)           # (B, 49, d_model)
-        src = self.norm2(src)                     # (B, 49, d_model)
-        
+                    self.linear1(self.norm2(src))
+                )
+            )
+        )
+        src = src + self.dropout3(src2)
         return src
 
 
@@ -85,10 +85,13 @@ class ResidualFCBlock(nn.Module):
         self.fc2 = nn.Linear(expand_feature, out_feature)
 
         if dropout_ratio is not None and dropout_ratio > 0:
-            self.drop = nn.Dropout(dropout_ratio)
+            self.drop1 = nn.Dropout(dropout_ratio)
+            self.drop2 = nn.Dropout(dropout_ratio)
+        else:
+            self.drop = None
         if use_bn:
-            self.norm1 = nn.BatchNorm1d(expand_feature)
-            self.norm2 = nn.BatchNorm1d(out_feature)
+            self.norm1 = nn.LayerNorm(expand_feature)
+            self.norm2 = nn.LayerNorm(out_feature)
             
         self.proj = nn.Linear(in_feature, out_feature) if in_feature != out_feature else nn.Identity()
 
@@ -98,14 +101,15 @@ class ResidualFCBlock(nn.Module):
         if hasattr(self, 'norm1'):
             out = self.norm1(out)
         out = self.act(out)
+        if self.drop1 is not None:
+            out = self.drop1(out)
         out = self.fc2(out)
         if hasattr(self, 'norm2'):
             out = self.norm2(out)
         out = self.act(out)
-
-        if self.drop is not None:
-            out = self.drop(out)
-
+        if self.drop2 is not None:
+            out = self.drop2(out)
+            
         out += residual
         return out
     

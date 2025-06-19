@@ -1,9 +1,10 @@
-from typing import Optional
+from typing import Optional,Union
 from Model.AutoEncoder import Conv1DAutoencoder, FCAutoencoder
 from Model.Encoder import EffNetTransformerEncoder
 from Model.MoE import MoE
 from Model.MultimodalModel import MultimodalModel
 from Model.MultiHeadTask import MultiHeadTask
+from Model.Encoder import EffNetPerformerEncoder, EffNetSimpleEncoder, EffNetTransformerEncoder
 
 import torch
 import torch.nn as nn
@@ -17,9 +18,9 @@ def init_except_autoencoder(m, act=nn.GELU, exclude_backbone_ids=None):
         return
 
     if isinstance(m, nn.Linear):
-        if isinstance(act, nn.GELU):
+        if act == nn.GELU:
             nn.init.xavier_uniform_(m.weight)
-        elif isinstance(act, nn.ReLU):
+        elif act == nn.ReLU:
             nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
         if m.bias is not None:
             nn.init.zeros_(m.bias)
@@ -36,29 +37,50 @@ class ETRIHumanUnderstandModel(nn.Module):
     def __init__(self,
                  mBle_in = 10,
                  img_size = 224,
-                 encoder_dict: dict = None,  # ✅ 실제 nn.ModuleDict
+                 base_backbone = None,
+                 encoder_dict: dict = None, 
                  encoder_config: dict = None, 
                  multimodal_feature_dim: int = 256,
                  ae_dict: nn.ModuleDict = None,
+                 base_block: Optional[Union[EffNetTransformerEncoder, EffNetSimpleEncoder, EffNetPerformerEncoder]]=None, 
                  fusion: str = 'projection', 
                  proj_dim: int = 256,
                  fc_expand_feature: int = 128,
                  dropout_ratio: float = 0.3,
                  act=nn.GELU,
                  hidden_layer_list:Optional[list[int]] = [128],
-                 MHT_hidden_layer_list:Optional[list[int]] = [128],
+                 MHT_input_header_hidden_layer_list:Optional[list[int]] = [128],
+                 MHT_heads_hidden_layer_list:Optional[list[int]] = [128],
+                 MHT_back_bone_hidden_layer_list:Optional[list[int]] = [128],
                  num_experts: int = 6,
                  use_moe: bool = True,
+                 moe_hidden_dim: int = 256,
                  heads = None,
                  gn = None,
-                 experts=None):
+                 experts=None,
+                 moe_gating_type: str = 'soft',   # 'soft', 'topk', 'noisy_topk'
+                 moe_k: int = 3,
+                 moe_noise_std: float = 0.0,
+                 moe_lambda_bal: float = 0.0,
+                 seed: int = 42):
         super().__init__()
+
+        if seed is not None:
+            import random, numpy as np
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         
 
         self.multimodal_model = MultimodalModel(
            mBle_in=mBle_in,
            img_size=img_size,
            encoder_dict=encoder_dict,
+           base_block = base_block,
+           base_model=base_backbone,
            encoder_config=encoder_config,
            out_feature=multimodal_feature_dim,
            ae_dict=ae_dict,
@@ -83,24 +105,30 @@ class ETRIHumanUnderstandModel(nn.Module):
                 num_experts=num_experts,
                 gating_network=gn,
                 experts=experts,
-                act=act
+                act=act,
+                gating_type=moe_gating_type,   # 'soft', 'topk', 'noisy_topk'
+                k=moe_k,
+                hidden_dim=moe_hidden_dim,
+                noise_std=moe_noise_std,
+                lambda_bal=moe_lambda_bal
             )
         else:
             self.moe = None
 
         self.MHT = MultiHeadTask(
             in_feature=self.multimodal_model.shared_dim,
-            hidden_layer_list=MHT_hidden_layer_list,
+            heads_hidden_layer_list=MHT_heads_hidden_layer_list,
+            input_header_hidden_layer_list=MHT_input_header_hidden_layer_list,
+            back_bone_hidden_layer_list=MHT_back_bone_hidden_layer_list,
             act=act,
             dropout_ratio=dropout_ratio,
             heads=heads,  # Define heads as needed
             ae_dict=ae_dict
         )
-
-        init_except_autoencoder(self, act=act)
+        for module in self.modules():
+            init_except_autoencoder(module, exclude_backbone_ids=None, act=act)
 
     def forward(self, inputs) -> torch.Tensor:
-        # TODO: 날짜 별로 데이터 나누어  multimodal_features_sleep_date ,multimodal_features_life_date 다른 피처 생성
 
         sleep_date_inputs = inputs['tensor_sleep']
         lifelog_date_inputs = inputs['tensor_lifelog']
@@ -118,12 +146,16 @@ class ETRIHumanUnderstandModel(nn.Module):
             multimodal_features_life_date = self.norm_before_moe(multimodal_features_life_date)
             
             # Apply MoE to both sleep and life date features
-            multimodal_features_sleep_date = self.moe(multimodal_features_sleep_date)
-            multimodal_features_life_date = self.moe(multimodal_features_life_date)
+            multimodal_features_sleep_date, sleep_date_bal_loss = self.moe(multimodal_features_sleep_date, training=self.training)
+            multimodal_features_life_date, life_date_bal_loss = self.moe(multimodal_features_life_date, training=self.training)
+            
+            sleep_date_bal_loss = sleep_date_bal_loss if sleep_date_bal_loss is not None else torch.tensor(0.0, device=multimodal_features_sleep_date.device)
+            life_date_bal_loss = life_date_bal_loss  if life_date_bal_loss  is not None else torch.tensor(0.0, device=multimodal_features_life_date.device)
+            bal_loss = (sleep_date_bal_loss + life_date_bal_loss) / 2
 
         output = self.MHT([multimodal_features_sleep_date, multimodal_features_life_date])
 
-        return output
+        return output, bal_loss
 
 if __name__ == "__main__":
     model = ETRIHumanUnderstandModel(

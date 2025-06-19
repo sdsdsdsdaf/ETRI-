@@ -4,8 +4,8 @@ import optuna
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.model_selection import KFold
-from hyper_tune_auto import suggest_encoder_config, build_encoder_dict
-from LifelogDataset import H5LifelogDataset
+from util.hyper_tune_auto import suggest_encoder_config, build_encoder_dict
+from util.LifelogDataset import H5LifelogDataset
 from model import ETRIHumanUnderstandModel  # Wraps encoders + heads
 from train import train_one_epoch, evaluate  # Define these separately
 
