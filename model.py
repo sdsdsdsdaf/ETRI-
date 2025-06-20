@@ -154,7 +154,6 @@ class ETRIHumanUnderstandModel(nn.Module):
             bal_loss = (sleep_date_bal_loss + life_date_bal_loss) / 2
 
         output = self.MHT([multimodal_features_sleep_date, multimodal_features_life_date])
-
         return output, bal_loss
 
 if __name__ == "__main__":

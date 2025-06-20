@@ -18,7 +18,21 @@ from torch.utils.data import DataLoader
 from util.EarlyStopping import EarlyStopping
 from Model.Encoder import EffNetTransformerEncoder
 from util.WarmupCosineScheduler import WarmupCosineScheduler
+import packaging.version
 
+def maybe_compile_model(model):
+    try:
+        # PyTorch 버전 확인
+        version = packaging.version.parse(torch.__version__.split("+")[0])
+        if version >= packaging.version.parse("2.0.0") and hasattr(torch, "compile"):
+            # torch.compile이 사용 가능한 경우
+            model = torch.compile(model)
+            print(f"Applied torch.compile on PyTorch {torch.__version__}")
+        else:
+            print(f"Skipping torch.compile: PyTorch {torch.__version__} does not support it")
+    except Exception as e:
+        print(f"Could not apply torch.compile: {e}")
+    return model
 
 def get_all_labels(dataset):
     """전체 label (multi-task)을 numpy array로 반환"""
@@ -162,7 +176,8 @@ def get_class_weights(labels: np.ndarray, ref_dtype=torch.float32, ref_device="c
     return weights
 
 def train(
-        model, 
+        model,
+        fold, 
         train_loader, 
         val_loader=None, 
         optimizer=None, 
@@ -209,7 +224,7 @@ def train(
         )
 
         if val_loader is not None:
-            val_metrics = evaluate(model, val_loader, criterion_list, device,log=log)
+            val_metrics, output = evaluate(model, val_loader, criterion_list, device,log=log)
             val_f1_macro = sum(m['f1_macro'] for m in val_metrics) / len(val_metrics) if val_metrics else 0
         else:
             continue
@@ -217,7 +232,7 @@ def train(
         if f1_score_log['best_1'] < val_f1_macro:
             os.makedirs(save_dir, exist_ok=True)
             print(f"🏆 New best F1-macro: {val_f1_macro:.4f} (previous: {f1_score_log['best_1']:.4f})")
-            torch.save(model.state_dict(), os.path.join(save_dir, f"model_bests.pt"))
+            torch.save(model.state_dict(), os.path.join(save_dir, "fold"+str(fold), f"model_best_1.pt"))
 
         f1_score_log['best_1'] = max(f1_score_log['best_1'], val_f1_macro)
         f1_score_log['best_5'].append(val_f1_macro)
@@ -332,6 +347,7 @@ def evaluate(model, val_loader, criterion_list, device='cuda', log = False):
                 pred_i = output_i.argmax(dim=1)    # (B,)
                 all_preds[i].extend(pred_i.cpu().numpy())
                 all_labels[i].extend(label_i.cpu().numpy())
+                outputs[i] = torch.softmax(output_i, dim=1)  # (B, num_classes_i)
 
     # 평가 지표 계산
     metrics = []
@@ -370,7 +386,7 @@ def evaluate(model, val_loader, criterion_list, device='cuda', log = False):
             f.write("y_true: " + ', '.join(map(str, all_labels[i])) + "\n")
             f.write("y_pred: " + ', '.join(map(str, all_preds[i])) + "\n")
 
-    return metrics
+    return metrics, outputs
 
 
 if __name__ == "__main__":
