@@ -91,7 +91,6 @@ class ETRIHumanUnderstandModel(nn.Module):
            act=act,
            hidden_layer_list=hidden_layer_list
         )
-
         self.use_moe = use_moe
         if self.use_moe:
 

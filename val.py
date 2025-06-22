@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader, Subset
+from tqdm.auto import tqdm
 
 from util.EarlyStopping import EarlyStopping
 from model import ETRIHumanUnderstandModel
@@ -14,18 +15,110 @@ from train import get_param_groups, train, evaluate, get_all_labels, get_class_w
 from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 import multiprocessing
 from torch.nn.functional import softmax
+import inspect
 
-def worker(fold, gpu_id, train_idx, val_idx, common_kwargs, queue:queue.Queue):
+def worker(fold, gpu_id, train_idx, val_idx, common_kwargs, model_kwargs, queue:queue.Queue, model_cls=ETRIHumanUnderstandModel):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    result, output = run_single_fold(
+    result = run_single_fold(
         fold=fold,
         gpu_device=str(gpu_id),
         train_idx=train_idx,
         val_idx=val_idx,
         **common_kwargs
     )
+
+    output = make_one_fold_oof_array(
+        fold=fold,
+        model_cls=model_cls,
+        model_config=model_kwargs,
+        config=common_kwargs,
+        val_idx=val_idx,
+        val_dataset=Subset(H5LifelogDataset(os.path.join(common_kwargs['h5_save_dir'], "train")), val_idx),
+        n_tasks=6,
+        class_counts=[2, 2, 2, 3, 2, 2],
+        device='cuda' if torch.cuda.is_available() else 'cpu')
+    
     print(f"Fold {fold} finished on GPU {gpu_id}: {result}")
     queue.put((fold, val_idx, output))
+
+def make_one_fold_oof_array(
+        fold,
+        model_cls=ETRIHumanUnderstandModel,
+        config=None,
+        model_config=None,
+        val_idx=None,
+        val_dataset=None,
+        n_tasks=6,
+        class_counts=[2, 2, 2, 3, 2, 2],
+        device='cpu'):
+    """
+    Create a NumPy array of out-of-fold (OOF) predictions for a single fold.
+
+    This function does not modify an external OOF list. Instead, it
+    returns an array of shape (len(val_idx), n_tasks, max_class),
+    where max_class is the maximum value in class_counts.
+
+    Args:
+        model (torch.nn.Module): Trained PyTorch model.
+        val_idx (List[int]): List of validation indices relative to the full dataset.
+        val_dataset (Dataset): Subset of the full dataset containing only validation samples.
+        n_tasks (int): Number of output tasks.
+        class_counts (List[int]): Number of classes for each task.
+        device (str): Device identifier (e.g., 'cpu' or 'cuda:0').
+
+    Returns:
+        np.ndarray: Array of shape (len(val_idx), n_tasks, max_class)
+                    containing softmax probabilities for each task.
+    """
+    # Set the model to evaluation mode
+    model = model_cls(**model_config) if model_config else model
+    model.to(device)
+    checkpoint = torch.load(os.path.join(config['save_dir'], f"fold{fold+1}/model_best_1.pt"), map_location=device)
+    model.load_state_dict(checkpoint)
+
+    model.eval()
+
+    # Determine the maximum number of classes across all tasks
+    max_classes = max(class_counts)
+
+    # Initialize the OOF array for this fold
+    fold_oof = np.zeros((len(val_idx), n_tasks, max_classes), dtype=np.float32)
+
+    # Create a DataLoader that iterates one sample at a time without shuffling
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    # Disable gradient calculations and enable mixed precision
+    with torch.no_grad(), torch.cuda.amp.autocast():
+        # Iterate over each validation sample
+        print(f"Processing fold {fold+1} with {len(val_loader)} validation samples...")
+        for batch_idx, (data, labels) in enumerate(tqdm(val_loader)): # labels: Tensor (B, 6)
+            inputs = {k: v.to(device, non_blocking=True) for k, v in data.items()if isinstance(v, torch.Tensor)}
+            inputs['modality_names'] = data['modality_names']
+            labels = labels.to(device)  # (B, 6)
+            outputs, bal_loss = model(inputs)
+
+            # Apply softmax and convert each output to a NumPy array
+            preds = [
+                softmax(output, dim=-1)
+                .cpu()
+                .numpy()
+                .squeeze(0)  # remove the batch dimension
+                for output in outputs   
+            ]
+
+            # Store predictions in the pre-allocated array
+            for t, p in enumerate(preds):
+                fold_oof[batch_idx, t, :p.shape[-1]] = p
+
+    return fold_oof
+
+
 
 def run_single_fold(
     fold: int,
@@ -175,14 +268,13 @@ def run_single_fold(
     checkpoint = torch.load(os.path.join(fold_save_dir, "model_best_1.pt"), map_location=device)
     model.load_state_dict(checkpoint)
     model.to(device).eval()
-    
-    _, output_best = evaluate(model, val_loader, criterion_list, device)
+
     return {
             "fold": fold + 1,
             "Best F1 Macro": f1_score_log['best_1'],
             "Best-5 F1 Macro": np.mean(f1_score_log['best_5']),
             "metrics": val_metrics
-    }, output_best
+    }
 
 
 def run_kfold_cross_validation(
@@ -272,6 +364,18 @@ def run_kfold_cross_validation(
     
     assert base_block is not None, "Base block must be specified."
 
+    
+    model_sig = inspect.signature(ETRIHumanUnderstandModel.__init__)
+    model_param_names = {
+        name for name in model_sig.parameters
+        if name != 'self'
+    }
+
+    model_kwargs = {
+        k: v for k, v in config.items()
+        if k in model_param_names
+    }
+
     # 전체 train 데이터셋
     full_dataset = H5LifelogDataset(os.path.join(h5_save_dir, "train"), seed=seed)
     labels = get_all_labels(full_dataset)
@@ -282,11 +386,10 @@ def run_kfold_cross_validation(
     n_tasks = len(class_counts)
     n_samples = len(labels)
 
-    oof_list = [
-        np.zeros((n_samples, n_cls)) 
-        for n_cls in class_counts
-    ]
+    max_classes = max(class_counts)
 
+    # Initialize the OOF array for this fold
+    fold_oof = np.zeros((len(labels), n_tasks, max_classes), dtype=np.float32)
     processes = []
 
     num_gpus = torch.cuda.device_count()
@@ -294,38 +397,44 @@ def run_kfold_cross_validation(
         result_queue = queue.Queue()
         for fold, (train_idx, val_idx) in enumerate(mskf.split(X=np.zeros(len(labels)), y=labels)):
             gpu_id = fold % torch.cuda.device_count()  # GPU ID for this fold
-            p = multiprocessing.Process(target=worker, args=(fold, gpu_id, train_idx, val_idx, config, result_queue))
+            p = multiprocessing.Process(target=worker, args=(fold, gpu_id, train_idx, val_idx, config, model_kwargs, result_queue))
             p.start()
             processes.append(p)
 
-
         for p in processes:
             p.join()
-
 
             while not result_queue.empty():
                 fold, val_idx, preds = result_queue.get()
                 for task_i, preds_val in enumerate(preds):
                     # preds_val.shape == (len(va_idx), class_counts[task_i])
-                    oof_list[task_i][val_idx] = preds_val
+                    fold_oof[val_idx,task_i,:preds_val.shape[-1]] = preds_val
 
     else:
         for fold, (train_idx, val_idx) in enumerate(mskf.split(X=np.zeros(len(labels)), y=labels)):
-            (result, output) = run_single_fold(
+            result = run_single_fold(
                 fold=fold,
                 gpu_device='0',  # 단일 GPU 사용 시
                 train_idx=train_idx,
                 val_idx=val_idx,
                 **config
             )
-            for task_i, preds_val in enumerate(output):
-                # preds_val.shape == (len(va_idx), class_counts[task_i])
-                oof_list[task_i][val_idx] = preds_val.cpu().numpy()
 
-            fold_results.append(result)
-            print(f"Fold {fold+1} finished.")
+            one_fold_result = make_one_fold_oof_array(
+                fold=fold,
+                model_cls=ETRIHumanUnderstandModel,
+                config=config,
+                model_config=model_kwargs,
+                val_idx=val_idx,
+                val_dataset=Subset(full_dataset, val_idx),
+                n_tasks=n_tasks,
+                class_counts=class_counts,
+                device=config['device']
+            )
+
+            fold_oof[val_idx,:,:] = one_fold_result
         
-    return fold_results
+    return fold_oof, mskf
 
 
 if __name__ == "__main__":
@@ -334,10 +443,15 @@ if __name__ == "__main__":
     from util.WarmupCosineScheduler import WarmupCosineScheduler
     from util.loss import FocalLoss
     from util.StackingEnsemble import StackingEnsemble
+    from sklearn.metrics import f1_score
+    from lightgbm import LGBMClassifier
+    from sklearn.linear_model import LogisticRegression
 
     multi_dim = 128
+    seed=42
+    class_counts = [2, 2, 2, 3, 2, 2]
     scheduler = ReduceLROnPlateau
-    results = run_kfold_cross_validation(
+    oof_results, mskf = run_kfold_cross_validation(
             batch_size=10,
             dropout_ratio=0.2,
             label_smoothing=0.01,
@@ -351,7 +465,7 @@ if __name__ == "__main__":
             proj_dim=multi_dim,
             MHT_heads_hidden_layer_list=[multi_dim//2, multi_dim//2, multi_dim//2, multi_dim//4],
             MHT_back_bone_hidden_layer_list=[multi_dim//2, multi_dim, multi_dim, multi_dim, multi_dim//2, multi_dim],
-            MHT_input_header_hidden_layer_list=[multi_dim*2 , multi_dim, multi_dim, multi_dim//2],
+            MHT_input_header_hidden_layer_list=[multi_dim*2, multi_dim, multi_dim, multi_dim//2],
             scheduler=ReduceLROnPlateau,
             experts = None, 
             num_experts = 5,
@@ -360,10 +474,35 @@ if __name__ == "__main__":
             moe_k = 2,
             moe_noise_std = 0.1,
             moe_lambda_bal = 0.005,
-            seed = 42,
+            seed = seed,
             epochs=0,
             early_stopping=EarlyStopping(patience=7, min_delta=0.001), 
             log=True)
+    
+    labels = get_all_labels(H5LifelogDataset(os.path.join("Img_Data", "train")))
+    f1_result = 0
+    for i in range(len(class_counts)):
+        f1_result += f1_score(y_true=labels[:, i], y_pred=np.argmax(oof_results[:, i, :], axis=-1), average='macro')
+    f1_result /= len(class_counts)
+    print(f"Before Ensemble OOF F1 Macro Score: {f1_result:.4f}")
+    # ensemble_model = StackingEnsemble(meta_model=LGBMClassifier(n_estimators=100, learning_rate=0.1, num_leaves=31, max_depth=-1, random_state=seed, verbosity=-1))
+    ensemble_model = StackingEnsemble(
+        base_models=None,
+        meta_model=LGBMClassifier(
+            n_estimators=20,
+            learning_rate=0.1,
+            num_leaves=3,
+            max_depth=2,
+            random_state=seed,
+            verbosity=-1,
+            class_weight='balanced',    
+        ),
+        use_proba=True,
+        cls_count=class_counts
+    )
 
-    ensemble_model = StackingEnsemble()
+    f1_macro_score = ensemble_model.score(X=oof_results, y=labels, cv=mskf, mode='f1_macro')
+    accuracy = ensemble_model.score(X=oof_results, y=labels, cv=mskf, mode='accuracy')
+    print(f"Final OOF results f1_macro: {f1_macro_score:.4f} accuracy: {accuracy:.4f}")
+
 

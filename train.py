@@ -34,7 +34,7 @@ def maybe_compile_model(model):
         print(f"Could not apply torch.compile: {e}")
     return model
 
-def get_all_labels(dataset):
+def get_all_labels(dataset) -> np.ndarray:
     """전체 label (multi-task)을 numpy array로 반환"""
     all_labels = []
 
