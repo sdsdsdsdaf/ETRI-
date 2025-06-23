@@ -475,7 +475,7 @@ if __name__ == "__main__":
             moe_noise_std = 0.1,
             moe_lambda_bal = 0.005,
             seed = seed,
-            epochs=0,
+            epochs=60,
             early_stopping=EarlyStopping(patience=7, min_delta=0.001), 
             log=True)
     
