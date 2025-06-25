@@ -11,11 +11,11 @@ optuna==4.3.0
 pandas==2.3.0
 performer_pytorch==1.1.4
 Pillow==11.2.1
-scikit_learn==1.7.0
-scipy==1.15.3
+scikit-learn==1.6.1
+scipy==1.13.1
 seaborn==0.13.2
 timm==1.0.15
 tqdm==4.67.1
 wandb==0.20.1
-networkx==3.4.2
+networkx==3.2.1
 lightgbm==4.6.0
