@@ -49,7 +49,7 @@ class PerformerWithFFNBlock(nn.Module):
     def forward(self, src):                       # src (B, 49, d_model)
         # Self Attention + Residual + Norm
         src2_input = self.norm1(src)
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast(device_type=src2_input.device.type, enabled=False):
             src2 = self.self_attn(src2_input.float())
             src2 = torch.nan_to_num(src2, nan=0.0, posinf=1.0, neginf=-1.0)
         src = src + self.dropout1(src2.type_as(src))

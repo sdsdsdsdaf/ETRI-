@@ -16,6 +16,19 @@ from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 import multiprocessing
 from torch.nn.functional import softmax
 import inspect
+from pytorch_optimizer import SAM
+from util.SAM import convert_bn_to_fp32
+from util.loss import FocalLoss
+from Model.Encoder import EffNetTransformerEncoder, EffNetSimpleEncoder, EffNetPerformerEncoder
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from util.WarmupCosineScheduler import WarmupCosineScheduler
+from util.loss import FocalLoss
+from util.StackingEnsemble import StackingEnsemble
+from sklearn.metrics import f1_score
+from lightgbm import LGBMClassifier
+from sklearn.linear_model import LogisticRegression
+from pytorch_optimizer import SAM
+
 
 def worker(fold, gpu_id, train_idx, val_idx, common_kwargs, model_kwargs, queue:queue.Queue, model_cls=ETRIHumanUnderstandModel):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -94,7 +107,7 @@ def make_one_fold_oof_array(
     )
 
     # Disable gradient calculations and enable mixed precision
-    with torch.no_grad(), torch.cuda.amp.autocast():
+    with torch.no_grad(), torch.amp.autocast(device_type=device if isinstance(device, str) else device.type):
         # Iterate over each validation sample
         print(f"Processing fold {fold+1} with {len(val_loader)} validation samples...")
         for batch_idx, (data, labels) in enumerate(tqdm(val_loader)): # labels: Tensor (B, 6)
@@ -199,6 +212,7 @@ def run_single_fold(
             seed=seed
         )
     model.to(device)
+    model.apply(convert_bn_to_fp32)
 
     # DataLoader 준비
     train_subset = Subset(full_dataset, train_idx)
@@ -220,8 +234,25 @@ def run_single_fold(
     class_weight_list = get_class_weights(labels=labels_train, ref_dtype=dtype, ref_device=device)
 
     # Optimizer 및 criterion
-    optimizer = torch.optim.AdamW(get_param_groups(model, base_lr=1e-4, decay_rate=0.3),
-                                      lr=lr, weight_decay=weight_decy)
+    # optimizer = torch.optim.AdamW(get_param_groups(model, base_lr=lr, decay_rate=0.3), weight_decay=weight_decy)
+
+    param_groups = get_param_groups(model, base_lr=lr, decay_rate=0.3)
+
+    #DEBUG
+    for group in param_groups:
+        group['params'] = [p for p in group['params'] if p.requires_grad]
+
+    
+    optimizer = SAM(
+        #get_param_groups(model, base_lr=lr, decay_rate=0.3),
+        param_groups,
+        torch.optim.AdamW,
+        lr=lr,
+        weight_decay=weight_decy, 
+        adaptive=False,
+        use_gc=True,
+        rho=0.001,)
+    
     criterion_list = [
         FocalLoss(label_smoothing=label_smoothing, gamma=gamma, alpha=class_weight_list[i])
         for i in range(len(class_weight_list))
@@ -233,19 +264,19 @@ def run_single_fold(
     scheduler_ins = None
     if scheduler is not None:
         if scheduler == WarmupCosineScheduler:
-                scheduler_ins = WarmupCosineScheduler(optimizer, warmup_epochs=10, total_epochs=epochs, min_lr=5e-6)
+                scheduler_ins = WarmupCosineScheduler(optimizer, warmup_epochs=10, total_epochs=epochs, min_lr=1e-8)
         elif scheduler== ReduceLROnPlateau:
                 scheduler_ins = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=7)
 
     # 학습 수행: train 함수 내부에서 maybe_compile_model 호출
     f1_score_log = train(
+            num_epochs=epochs,
             early_stopping=early_stopping,
             fold=fold+1,
             model=model,
             train_loader=train_loader,
-            val_loader=val_loader,
-            num_epochs=epochs,
-            scheduler=scheduler_ins,
+            weight_decy=weight_decy,
+            val_loader=val_loader, 
             freeze_epoch=freeze,
             optimizer=optimizer,
             criterion_list=criterion_list,
@@ -446,22 +477,24 @@ if __name__ == "__main__":
     from sklearn.metrics import f1_score
     from lightgbm import LGBMClassifier
     from sklearn.linear_model import LogisticRegression
+    from pytorch_optimizer import SAM
 
     multi_dim = 128
     seed=42
     class_counts = [2, 2, 2, 3, 2, 2]
     scheduler = ReduceLROnPlateau
     oof_results, mskf = run_kfold_cross_validation(
-            batch_size=10,
-            dropout_ratio=0.2,
+            lr=5e-5,
+            batch_size=4,
+            dropout_ratio=0.3,
             label_smoothing=0.01,
-            weight_decy=1e-5,
-            base_backbone="mobilenetv2_100",
+            weight_decy=5e-4,
+            base_backbone="efficientformerv2_s0",
             base_block=EffNetPerformerEncoder,
             multimodal_feature_dim=multi_dim,
-            freeze=25,
+            freeze=5,
             fusion='attention',
-            use_moe=True,
+            use_moe=True,  
             proj_dim=multi_dim,
             MHT_heads_hidden_layer_list=[multi_dim//2, multi_dim//2, multi_dim//2, multi_dim//4],
             MHT_back_bone_hidden_layer_list=[multi_dim//2, multi_dim, multi_dim, multi_dim, multi_dim//2, multi_dim],

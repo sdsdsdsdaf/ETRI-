@@ -19,6 +19,19 @@ from util.EarlyStopping import EarlyStopping
 from Model.Encoder import EffNetTransformerEncoder
 from util.WarmupCosineScheduler import WarmupCosineScheduler
 import packaging.version
+from pytorch_optimizer import SAM
+
+def check_grad_nan_inf(model):
+    has_issue = False
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            if torch.isnan(param.grad).any():
+                print(f"⚠️ NaN detected in grad of parameter: {name} | shape: {param.grad.shape}")
+                has_issue = True
+            if torch.isinf(param.grad).any():
+                print(f"⚠️ Inf detected in grad of parameter: {name} | shape: {param.grad.shape}")
+                has_issue = True
+
 
 def maybe_compile_model(model):
     try:
@@ -57,6 +70,7 @@ def get_multitask_stratified_kfold_splits(
     X_dummy = np.zeros((labels.shape[0], 1))  # X는 필요 없으니 dummy로
     return mskf.split(X_dummy, labels)
 
+
 def get_param_groups(model, base_lr=5e-4, decay_rate=0.2):
     param_groups = []
 
@@ -75,10 +89,12 @@ def get_param_groups(model, base_lr=5e-4, decay_rate=0.2):
         })
 
     # ③ MoE
-    param_groups.append({
-        'params': model.moe.parameters(),
-        'lr': base_lr * 1.5
-    })
+    if model.use_moe and model.moe is not None:
+        # MoE의 gating network와 experts는 다른 lr로 설정
+        param_groups.append({
+            'params': model.moe.gating_network.parameters(),
+            'lr': base_lr * 1.5
+        })
 
     # ④ MultiHeadTask
     param_groups.append({
@@ -95,9 +111,21 @@ def freeze_backbone(model):
                 param.requires_grad = False
     print("✅ Backbone frozen.")
 
-def reset_optimizer(model, base_lr=1e-4):
+def reset_optimizer(model, base_lr=1e-5, weight_decy=5e-6):
+
+    #TODO SAM Optimizer로 변경
     new_params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.AdamW(new_params, lr=base_lr)
+
+    optimizer = SAM(
+        #get_param_groups(model, base_lr=lr, decay_rate=0.3),
+        new_params,
+        torch.optim.AdamW,
+        lr=base_lr,
+        weight_decay=weight_decy, 
+        adaptive=False,
+        use_gc=True,
+        rho=0.001,)
+    return optimizer
    
 
 
@@ -127,9 +155,29 @@ def train_one_epoch(
         inputs['modality_names'] = data['modality_names']
         labels = labels.to(device).long()  # (B, 6)
 
+        # print(inputs['modality_names'].min(), inputs['modality_names'].max())
         optimizer.zero_grad()
 
-        with autocast():
+        with torch.amp.autocast(device_type=device, enabled=True):
+            outputs, bal_loss = model(inputs)  # ➜ List of outputs: [out0, out1, ..., out5]
+            losses = [
+                criterion_list[i](outputs[i], labels[:, i])
+                for i in range(num_tasks)
+            ]
+            total_loss = sum(losses) + bal_loss
+        
+        scaler.scale(total_loss).backward()
+        scaler.unscale_(optimizer)
+        check_grad_nan_inf(model)
+        optimizer.first_step(zero_grad=True)
+
+        """
+        total_loss.backward()    
+        # check_grad_nan_inf(model)
+        optimizer.first_step(zero_grad=True)
+        """
+
+        with torch.amp.autocast(device_type=device, enabled=True):
             outputs, bal_loss = model(inputs)  # ➜ List of outputs: [out0, out1, ..., out5]
             losses = [
                 criterion_list[i](outputs[i], labels[:, i])
@@ -138,7 +186,8 @@ def train_one_epoch(
             total_loss = sum(losses) + bal_loss
 
         scaler.scale(total_loss).backward()
-        scaler.step(optimizer)
+        check_grad_nan_inf(model)
+        optimizer.second_step(zero_grad=True)
         scaler.update()
 
         for i in range(num_tasks):
@@ -180,7 +229,8 @@ def train(
         fold, 
         train_loader, 
         val_loader=None, 
-        optimizer=None, 
+        optimizer=None,
+        weight_decy=5e-6, 
         criterion_list=None, 
         scheduler=None,
         num_epochs=10,
@@ -194,9 +244,11 @@ def train(
         save_dir="./checkpoints"):
     
 
-    device = torch.device(device)
+    if isinstance(device, torch.device):
+        device = device.type
+
     model.to(device)
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler(device=device, enabled=True, init_scale=2.0, growth_interval=2000)
     f1_score_log = {'best_1': float('-inf'), 'best_5': [float('-inf')] * 5}
     f1_score_log['best_5'] = sorted(f1_score_log['best_5'], reverse=False)
     
@@ -205,7 +257,7 @@ def train(
 
         if epoch == freeze_epoch:
             freeze_backbone(model)
-            optimizer = reset_optimizer(model, base_lr=after_freeze_lr)
+            optimizer = reset_optimizer(model, base_lr=after_freeze_lr, weight_decy=weight_decy)
             if scheduler is not None and isinstance(scheduler, WarmupCosineScheduler):
                 scheduler = scheduler = WarmupCosineScheduler(optimizer, warmup_epochs=0, total_epochs=num_epochs, min_lr=5e-5)
             if scheduler is not None and isinstance(scheduler, ReduceLROnPlateau):
@@ -226,6 +278,7 @@ def train(
         if val_loader is not None:
             val_metrics, output = evaluate(model, val_loader, criterion_list, device,log=log)
             val_f1_macro = sum(m['f1_macro'] for m in val_metrics) / len(val_metrics) if val_metrics else 0
+            val_acc = sum(m['acc_macro'] for m in val_metrics) / len(val_metrics) if val_metrics else 0
         else:
             continue
 
@@ -306,7 +359,7 @@ def train(
         train_f1_macro = sum(train_f1_macro_list) / len(train_f1_macro_list)
         total_val_loss = sum(m['loss'] for m in val_metrics) if val_metrics else 0
         total_val_loss /= len(val_metrics)
-        print(f"Epoch {epoch+1}: Train Loss {np.mean(train_loss):.4f},  Val Loss {total_val_loss:.4f}, Train Acc {train_acc:.4f}, Train_f1_macro {train_f1_macro:.4f}, Val_f1_macro {val_f1_macro:.4f}")
+        print(f"Epoch {epoch+1}: Train Loss {np.mean(train_loss):.4f},  Val Loss {total_val_loss:.4f}, Train Acc {train_acc:.4f}, Val Acc {val_acc:.4f},Train_f1_macro {train_f1_macro:.4f}, Val_f1_macro {val_f1_macro:.4f}")
 
         val_loss = total_val_loss / len(val_metrics)
 
@@ -328,21 +381,20 @@ def evaluate(model, val_loader, criterion_list, device='cuda', log = False):
     all_labels = [[] for _ in range(num_tasks)]
     total_losses = [0.0 for _ in range(num_tasks)]
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast(device_type=device if isinstance(device, str) else device.type, enabled=False):
         for batch in tqdm(val_loader, desc="Evaluating"):
             data, labels = batch  # labels: Tensor (B, 6)
             inputs = {k: v.to(device, non_blocking=True) for k, v in data.items()if isinstance(v, torch.Tensor)}
             inputs['modality_names'] = data['modality_names']
             labels = labels.to(device)  # (B, 6)
 
-            with torch.cuda.amp.autocast():
-                outputs, bal_loss = model(inputs)  # List of 6 outputs, each (B, num_classes_i)
+            outputs, bal_loss = model(inputs)  # List of 6 outputs, each (B, num_classes_i)
 
             for i in range(num_tasks):
                 label_i = labels[:, i]             # (B,)
                 output_i = outputs[i]              # (B, num_classes_i)
                 loss_i = criterion_list[i](output_i, label_i)
-                total_losses[i] += loss_i.item()
+                total_losses[i] += loss_i.item() 
 
                 pred_i = output_i.argmax(dim=1)    # (B,)
                 all_preds[i].extend(pred_i.cpu().numpy())
@@ -412,6 +464,7 @@ if __name__ == "__main__":
     model = ETRIHumanUnderstandModel(base_block=EffNetTransformerEncoder)
     optimizer = torch.optim.AdamW(get_param_groups(model, base_lr=5e-4, decay_rate=0.2))
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=4)
+
 
     dtype = torch.float16 if use_amp else torch.float32
     class_weight_list = get_class_weights(labels=get_all_labels(train_dataset), ref_dtype=dtype, ref_device='cuda')
