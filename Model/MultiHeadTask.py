@@ -52,7 +52,7 @@ class MultiHeadTask(nn.Module):
         if heads is None:
             self.heads = nn.ModuleList([
                 nn.Sequential(
-                    nn.LayerNorm(in_feature),
+                    nn.LayerNorm(back_bone_hidden_layer_list[-1]),
                     ResidualFCEncoder(
                         in_feature=back_bone_hidden_layer_list[-1], 
                         out_feature=out_dim, 

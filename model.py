@@ -95,7 +95,7 @@ class ETRIHumanUnderstandModel(nn.Module):
         if self.use_moe:
 
             self.norm_before_moe = nn.Sequential(
-                nn.LayerNorm(multimodal_feature_dim),
+                nn.LayerNorm(multimodal_feature_dim*12 if fusion == 'concat' else multimodal_feature_dim),
                 nn.Dropout(dropout_ratio)
             )
 
@@ -113,6 +113,7 @@ class ETRIHumanUnderstandModel(nn.Module):
             )
         else:
             self.moe = None
+
 
         self.MHT = MultiHeadTask(
             in_feature=self.multimodal_model.shared_dim,

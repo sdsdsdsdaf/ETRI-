@@ -39,7 +39,10 @@ def objective(trial: optuna.Trial):
     moe_lambda_bal = trial.suggest_float("moe_lambda_bal", 0.0, 1.0)
     seed = 42
     base_backbone = trial.suggest_categorical("base_backbone", ["efficientformerv2_s0", "regnety_004"])
-   
+    
+    if moe_k > num_experts:
+        moe_k = num_experts
+
     class_counts = [2, 2, 2, 3, 2, 2]
     oof_results, mskf = run_kfold_cross_validation(
             lr=lr,
