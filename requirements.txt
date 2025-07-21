@@ -1,7 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.3.0+cu118
-torchvision==0.18.0+cu118
-torchaudio==2.3.0+cu118
+torch==2.6.0+cu118
+torchvision==0.21.0+cu118
+torchaudio==2.6.0+cu118
 h5py==3.14.0
 ipython==8.12.3
 iterative_stratification==0.1.9
@@ -19,3 +19,4 @@ tqdm==4.67.1
 wandb==0.20.1
 networkx==3.2.1
 lightgbm==4.6.0
+pytorch_optimizer==3.6.1
