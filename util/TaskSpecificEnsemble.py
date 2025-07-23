@@ -19,7 +19,7 @@ class TaskSpecificEnsemble(BaseEstimator, ClassifierMixin):
         n_tasks = len(self.cls_count)
         self.models_ = []
         for t in range(n_tasks):
-            Xt = X_list[:, t, :self.cls_count[t]].reshape(-1,self.cls_count[t])
+            Xt = X_list[:, t, :]
             yt = y[:, t]    
             est = clone(self.base_estimator)
             est.fit(Xt, yt)
@@ -34,21 +34,17 @@ class TaskSpecificEnsemble(BaseEstimator, ClassifierMixin):
         n_tasks = len(self.cls_count)
         preds = []
         for t in range(n_tasks):
-            Xt = X_list[:, t, :self.cls_count[t]].reshape(-1,self.cls_count[t])
+            Xt = X_list[:, t, :]
             est = self.models_[t]
             preds_t = est.predict(Xt)
             preds.append(preds_t.reshape(-1, 1))
 
         return np.hstack(preds)
 
-    def predict_proba(self, X_list):
-        """
-        X_list: list of length n_tasks
-        반환: list of arrays, 각 (n_samples, n_classes_t)
-        """
+    def predict_proba(self, X: np.ndarray):
         probas = []
-        for t in range(len(X_list)):
-            Xt = X_list[t]
+        for t in range(len(self.cls_count)):
+            Xt = X[:, t, :]
             est = self.models_[t]
             probas.append(est.predict_proba(Xt))
         return probas

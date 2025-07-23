@@ -46,7 +46,7 @@ def objective(trial: optuna.Trial):
     class_counts = [2, 2, 2, 3, 2, 2]
     oof_results, mskf = run_kfold_cross_validation(
             lr=lr,
-            batch_size=4,
+            batch_size=32,
             dropout_ratio=dropout_ratio,
             label_smoothing=label_smoothing,
             weight_decy=weight_decay,
@@ -113,6 +113,7 @@ if __name__ == "__main__":
     study = optuna.create_study(
         direction='maximize',  # f1_macro_score를 maximize 하니까
         sampler=sampler,
+        storage="sqlite:///moe_model_tuning.db",
         pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=2),
         study_name='moe_model_tuning'
     )

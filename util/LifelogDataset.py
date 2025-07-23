@@ -332,7 +332,6 @@ if __name__ == "__main__":
         augment=True,
         resize=(224, 224),  # 내부에선 사용되지 않음
         aug_prob=0.7,
-        repeat=3,
         seed=42,
         debug=True,
     )

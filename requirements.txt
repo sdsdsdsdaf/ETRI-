@@ -20,3 +20,5 @@ wandb==0.20.1
 networkx==3.2.1
 lightgbm==4.6.0
 pytorch_optimizer==3.6.1
+catboost==1.2.8
+xgboost==3.0.2

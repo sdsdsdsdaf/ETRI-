@@ -846,13 +846,13 @@ def data_load_and_split_test_and_train( #TODO threshhold=0.3, continuous_time=18
     print("📦 [test_dict] 생성 완료 (tqdm)...")
     
     test_label = {
-        (row.subject_id, pd.to_datetime(row.sleep_date).date(), pd.to_datetime(row.lifelog_date).date()):
-            [row.Q1,
-            row.Q2,
-            row.Q3,
-            row.S1,
-            row.S2,
-            row.S3]
+        (row.subject_id, pd.to_datetime(row.sleep_date).date(), pd.to_datetime(row.lifelog_date).date()):{
+            "Q1": row.Q1,
+            "Q2": row.Q2,
+            "Q3": row.Q3,
+            "S1": row.S1,
+            "S2": row.S2,
+            "S3": row.S3}
         for _, row in test_data.iterrows()}
     
     train_dict = dict(sorted(train_dict.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])))
@@ -1013,7 +1013,7 @@ if __name__ == "__main__":
         print("📝 Labels:", train_label.get(k, {}))
 
     # 🔁 적용
-    sleep_none_counts, lifelog_none_counts = count_none_per_modality(train_data)
+    sleep_none_counts, lifelog_none_counts = count_none_per_modality(test_data)
 
     # 📊 데이터프레임으로 보기 좋게 정리
     none_df = pd.DataFrame({

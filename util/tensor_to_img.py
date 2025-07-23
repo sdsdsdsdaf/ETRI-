@@ -238,9 +238,40 @@ def process_all_samples(
 
     print(f"Converting Data to Img...")
     for key, (sleep_dict, lifelog_dict) in tqdm(data_dict.items(), leave=False):
+        if len(sleep_dict) == 0:
+            sleep_dict = {
+                'mACStatus': None, 
+                'mACStatus': None, 
+                'mActivity': None, 
+                'mAmbience': None, 
+                'mBle':None, 
+                'mGps':None, 
+                'mLight':None, 
+                'mScreenStatus':None, 
+                'mWifi':None, 
+                'wPedo':None,
+                'mUsageStats':None,
+                'wHr': None, 
+                'wLight': None}
+            
+        if len(lifelog_dict) == 0:
+            lifelog_dict = {
+                'mACStatus': None, 
+                'mACStatus': None, 
+                'mActivity': None, 
+                'mAmbience': None, 
+                'mBle':None, 
+                'mGps':None, 
+                'mLight':None, 
+                'mScreenStatus':None, 
+                'mWifi':None, 
+                'wPedo':None,
+                'mUsageStats':None,
+                'wHr': None, 
+                'wLight': None}
+            
         subject_id, sleep_date, lifelog_date = key
 
-        
         #디버그
         none_sleep_mods_list = []
         none_lifelog_mods_list = []
@@ -363,14 +394,16 @@ data_dict_5_samples = {k: data_dict[k] for k in list(data_dict.keys())[:10]}
 with open("train_data_subset_5.pkl", 'wb') as f:
     pickle.dump(data_dict_5_samples, f)
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Run example
 process_all_samples(
-    pkl_path="Data_Dict/train_data_filtered_daily_linear_ratio_mask.pkl",
-    label_path = "Data_Dict/train_label_daily_linear_ratio_mask.pkl",
-    save_dir="Img_Data/train",
+    pkl_path="Data_Dict/test_data_daily_linear_ratio_mask.pkl",
+    label_path = "Data_Dict/test_label_daily_linear_ratio_mask.pkl",
+    save_dir="Img_Data/test",
     resize=(224, 224),
-    img_save=False,
+    img_save=True,
     debug = False
 )
 

@@ -14,12 +14,15 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 from util.LifelogDataset import H5LifelogDataset
 from torch.utils.data import DataLoader
-
+from util.SAM import convert_bn_to_fp32
+from model import ETRIHumanUnderstandModel
 from util.EarlyStopping import EarlyStopping
-from Model.Encoder import EffNetTransformerEncoder
+from Model.Encoder import EffNetPerformerEncoder, EffNetSimpleEncoder, EffNetTransformerEncoder
 from util.WarmupCosineScheduler import WarmupCosineScheduler
 import packaging.version
 from pytorch_optimizer import SAM
+from util.loss import FocalLoss
+from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
 
 def check_grad_nan_inf(model):
     has_issue = False
@@ -168,7 +171,7 @@ def train_one_epoch(
         
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
-        check_grad_nan_inf(model)
+        # check_grad_nan_inf(model)
         optimizer.first_step(zero_grad=True)
 
         """
@@ -186,7 +189,7 @@ def train_one_epoch(
             total_loss = sum(losses) + bal_loss
 
         scaler.scale(total_loss).backward()
-        check_grad_nan_inf(model)
+        # check_grad_nan_inf(model)
         optimizer.second_step(zero_grad=True)
         scaler.update()
 
@@ -228,7 +231,8 @@ def train(
         model,
         fold, 
         train_loader, 
-        val_loader=None, 
+        val_loader=None,
+        batch_size=32, 
         optimizer=None,
         weight_decy=5e-6, 
         criterion_list=None, 
@@ -284,8 +288,18 @@ def train(
 
         if f1_score_log['best_1'] < val_f1_macro:
             os.makedirs(save_dir, exist_ok=True)
+            if not isinstance(fold, str):
+                os.makedirs(os.path.join(save_dir, "fold"+str(fold)), exist_ok=True)
+            else:
+                os.makedirs(os.path.join(save_dir, fold), exist_ok=True)
+
             print(f"🏆 New best F1-macro: {val_f1_macro:.4f} (previous: {f1_score_log['best_1']:.4f})")
-            torch.save(model.state_dict(), os.path.join(save_dir, "fold"+str(fold), f"model_best_1.pt"))
+ 
+            if isinstance(fold, str):
+                print(os.path.join(save_dir, fold, "model_best_1.pt"))
+                torch.save(model.state_dict(), os.path.join(save_dir, fold, "model_best_1.pt"))
+            else:
+                torch.save(model.state_dict(), os.path.join(save_dir, "fold"+str(fold), f"model_best_1.pt"))
 
         f1_score_log['best_1'] = max(f1_score_log['best_1'], val_f1_macro)
         f1_score_log['best_5'].append(val_f1_macro)
@@ -440,6 +454,325 @@ def evaluate(model, val_loader, criterion_list, device='cuda', log = False):
 
     return metrics, outputs
 
+def train_optuna_setting(trials, epochs ,batch_size=32, num_workers=4, seed=42, is_train=None):
+    BASE_BLOCK_CLASSES = {
+        "EffNetPerformerEncoder": EffNetPerformerEncoder,
+        "EffNetSimpleEncoder": EffNetSimpleEncoder,
+        "EffNetTransformerEncoder": EffNetTransformerEncoder,
+    }
+    sss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=seed)
+
+    if os.path.exists("Weights"):
+        print("Weights directory already exists. Skipping creation.")
+        return sss
+
+    for i ,trial in enumerate(trials):
+        params = trial.params
+        trial_number = trial.number
+
+        print(f"\n [{i+1}/{len(trials)}] ==== Single training with Trial {trial_number} params ====\n")
+        print(params)
+
+        # param extraction + type cast
+        lr = float(params.get("lr", 1e-4))
+        dropout_ratio = float(params.get("dropout_ratio", 0.5))
+        label_smoothing = float(params.get("label_smoothing", 0.0))
+        weight_decay = float(params.get("weight_decay", 1e-4))
+        base_block = params.get("base_block", "EffNetPerformerEncoder")
+        multimodal_feature_dim = int(params.get("multimodal_feature_dim", 128))
+        fusion = params.get("fusion", "concat")
+        num_experts = int(params.get("num_experts", 4))
+        moe_gating_type = params.get("moe_gating_type", "soft")
+        moe_hidden_dim = int(params.get("moe_hidden_dim", 128))
+        moe_k = int(params.get("moe_k", 4))
+        moe_noise_std = float(params.get("moe_noise_std", 0.0))
+        moe_lambda_bal = float(params.get("moe_lambda_bal", 0.0))
+        base_backbone = params.get("base_backbone", "efficientformerv2_s0")
+        use_moe = True
+        device = 'cuda'
+        use_amp = True
+
+      
+        if moe_k > num_experts:
+            moe_k = num_experts
+
+        # 여기서 cross-validation 아닌 단일 run
+
+        model = ETRIHumanUnderstandModel(
+            dropout_ratio=dropout_ratio,
+            base_backbone=base_backbone,
+            base_block=BASE_BLOCK_CLASSES[base_block],
+            multimodal_feature_dim=multimodal_feature_dim,
+            fusion=fusion,
+            use_moe=use_moe,
+            proj_dim=multimodal_feature_dim,
+            MHT_heads_hidden_layer_list=[multimodal_feature_dim//2, multimodal_feature_dim//2, multimodal_feature_dim//2, multimodal_feature_dim//4],
+            MHT_back_bone_hidden_layer_list=[multimodal_feature_dim//2, multimodal_feature_dim, multimodal_feature_dim, multimodal_feature_dim, multimodal_feature_dim//2, multimodal_feature_dim],
+            MHT_input_header_hidden_layer_list=[multimodal_feature_dim*2, multimodal_feature_dim, multimodal_feature_dim, multimodal_feature_dim//2],
+            num_experts=num_experts,
+            moe_gating_type=moe_gating_type,
+            moe_hidden_dim=moe_hidden_dim,
+            moe_k=moe_k,
+            moe_noise_std=moe_noise_std,
+            moe_lambda_bal=moe_lambda_bal,
+            seed=seed
+        )
+        model.to(device)
+        model.apply(convert_bn_to_fp32)
+
+        dataset = H5LifelogDataset(os.path.join("Img_Data", "train"))
+        labels = get_all_labels(dataset)
+
+        if is_train:
+            # 80/20 stratified split
+            train_idx, val_idx = next(sss.split(X=np.zeros(len(labels)), y=labels))
+
+            train_subset = torch.utils.data.Subset(dataset, train_idx)
+            val_subset = torch.utils.data.Subset(dataset, val_idx)
+
+            train_loader = DataLoader(
+                train_subset, batch_size=batch_size, shuffle=True,
+                num_workers=num_workers, pin_memory=True, drop_last=False,
+                persistent_workers=True, prefetch_factor=2
+            )
+            val_loader = DataLoader(
+                val_subset, batch_size=batch_size, shuffle=False,
+                num_workers=num_workers, pin_memory=True, drop_last=False,
+                persistent_workers=True, prefetch_factor=2
+            )
+        else:
+            # 전체 dataset으로 train만
+            train_loader = DataLoader(
+                dataset, batch_size=batch_size, shuffle=True,
+                num_workers=num_workers, pin_memory=True, drop_last=False,
+                persistent_workers=True, prefetch_factor=2
+            )
+            val_loader = None
+
+        if is_train:
+            labels_train = get_all_labels(train_subset)
+        else:
+            labels_train = get_all_labels(dataset)
+
+        dtype = torch.float16 if use_amp else torch.float32
+        class_weight_list = get_class_weights(labels=labels_train, ref_dtype=dtype, ref_device=device)
+
+        param_groups = get_param_groups(model, base_lr=lr, decay_rate=0.3)
+
+        for group in param_groups:
+            group['params'] = [p for p in group['params'] if p.requires_grad]
+
+        optimizer = SAM(
+        #get_param_groups(model, base_lr=lr, decay_rate=0.3),
+            param_groups,
+            torch.optim.AdamW,
+            lr=lr,
+            weight_decay=weight_decay, 
+            adaptive=False,
+            use_gc=True,
+            rho=0.001,)
+
+        criterion_list = [
+            FocalLoss(label_smoothing=label_smoothing, gamma=2.0, alpha=class_weight_list[i])
+            for i in range(len(class_weight_list))
+        ]
+        early_stopping = EarlyStopping(patience=7, min_delta=0.001)
+        torch.set_float32_matmul_precision('high')
+
+        train(
+            num_epochs=epochs,
+            early_stopping=early_stopping if is_train else None,
+            fold=f'trial_{trial_number}',
+            model=model,
+            train_loader=train_loader,
+            weight_decy=weight_decay,
+            val_loader=val_loader, 
+            freeze_epoch=15,
+            optimizer=optimizer,
+            criterion_list=criterion_list,
+            device=device,
+            log_wandb=False,
+            log=False,
+            after_freeze_lr=1e-5,
+            save_dir = "Weights"
+        )
+
+    return sss
+
+def build_meta_features(top_trials, loader, device):
+    meta_feat = []
+    labels_list = None
+
+    for t_idx, trial in enumerate(top_trials):
+        params = trial.params
+        trial_number = trial.number
+        print(f"\n[{t_idx + 1}/{len(top_trials)}]==== Building meta features for Trial {trial_number} ====")
+
+        # Model 복원 (위 코드와 동일)
+        base_block = params.get("base_block", "EffNetPerformerEncoder")
+        multimodal_feature_dim = int(params.get("multimodal_feature_dim", 128))
+        fusion = params.get("fusion", "concat")
+        num_experts = int(params.get("num_experts", 4))
+        moe_gating_type = params.get("moe_gating_type", "soft")
+        moe_hidden_dim = int(params.get("moe_hidden_dim", 128))
+        moe_k = int(params.get("moe_k", 4))
+        moe_noise_std = float(params.get("moe_noise_std", 0.0))
+        moe_lambda_bal = float(params.get("moe_lambda_bal", 0.0))
+        base_backbone = params.get("base_backbone", "efficientformerv2_s0")
+        use_moe = True
+
+        if moe_k > num_experts:
+            moe_k = num_experts
+
+        BASE_BLOCK_CLASSES = {
+            "EffNetPerformerEncoder": EffNetPerformerEncoder,
+            "EffNetSimpleEncoder": EffNetSimpleEncoder,
+            "EffNetTransformerEncoder": EffNetTransformerEncoder,
+        }
+
+        model = ETRIHumanUnderstandModel(
+            dropout_ratio=float(params.get("dropout_ratio", 0.5)),
+            base_backbone=base_backbone,
+            base_block=BASE_BLOCK_CLASSES[base_block],
+            multimodal_feature_dim=multimodal_feature_dim,
+            fusion=fusion,
+            use_moe=use_moe,
+            proj_dim=multimodal_feature_dim,
+            MHT_heads_hidden_layer_list=[multimodal_feature_dim//2]*3 + [multimodal_feature_dim//4],
+            MHT_back_bone_hidden_layer_list=[multimodal_feature_dim//2, multimodal_feature_dim, multimodal_feature_dim, multimodal_feature_dim, multimodal_feature_dim//2, multimodal_feature_dim],
+            MHT_input_header_hidden_layer_list=[multimodal_feature_dim*2, multimodal_feature_dim, multimodal_feature_dim, multimodal_feature_dim//2],
+            num_experts=num_experts,
+            moe_gating_type=moe_gating_type,
+            moe_hidden_dim=moe_hidden_dim,
+            moe_k=moe_k,
+            moe_noise_std=moe_noise_std,
+            moe_lambda_bal=moe_lambda_bal,
+            seed=42
+        )
+        model.to(device)
+
+        weight_path = os.path.join("Weights", f"trial_{trial_number}","model_best_1.pt")
+        state_dict = torch.load(weight_path, map_location=device)
+        model.load_state_dict(state_dict)
+        model.eval()
+
+        preds = []
+        with torch.no_grad():
+            for batch in tqdm(loader, leave=False):
+                data, labels = batch
+                inputs = {k: v.to(device, non_blocking=True) for k, v in data.items() if isinstance(v, torch.Tensor)}
+                inputs['modality_names'] = data['modality_names']
+                outputs, _ = model(inputs)  # outputs: list of Tensors per task
+
+                # → 하나의 batch를 (B, n_tasks, n_classes_per_task)로 구성
+                batch_size = next(iter(outputs)).shape[0]
+                batch_pred = np.zeros((batch_size, 6, 3), dtype=np.float32)
+
+                for i, o in enumerate(outputs):
+                    probs = o.softmax(-1).cpu().numpy()  # (B, cls_count[i])
+                    batch_pred[:, i, :probs.shape[1]] = probs  # (B, 1, cls_count[i])
+
+                preds.append(batch_pred)
+                if t_idx == 0:
+                    if labels_list is None:
+                        labels_list = []
+                    labels_list.append(labels.cpu().numpy())
+
+        # 전체 concat
+        preds_all = np.concatenate(preds, axis=0)  # (N, n_tasks, cls_count[i])
+        meta_feat.append(preds_all)
+        print(f"✅ Meta features for Trial {trial_number} built with shape: {preds_all.shape}")
+
+    # print("Labels List: ",labels_list)
+    X_meta = np.concatenate(meta_feat, axis=2)  # (N, n_tasks, cls_count[i])
+    y_meta = np.concatenate(labels_list, axis=0)  # (N, n_tasks)
+
+    print(f"✅ Meta features built complete with shape: {X_meta.shape} label shape{y_meta.shape}")
+    return X_meta, y_meta
+
+def ensemble_training(top_trials, num_workers = 4, batch_size = 8, epochs=2, is_train=True):
+    h5_save_dir = "Img_Data"
+    train_or_test = {True: "train", False: "test"}
+    lr = 1e-3
+    use_amp = True
+    class_counts = [2, 2, 2, 3, 2, 2]
+    device = 'cuda'
+    seed=42
+
+    if os.path.exists("Weights"):
+        print("Weights directory already exists. Skipping creation.")
+        return None
+    
+    sss = train_optuna_setting(top_trials, epochs=epochs, num_workers = 4, batch_size = 32, is_train=is_train)
+    dataset = H5LifelogDataset(os.path.join(h5_save_dir, 'train'))
+    labels_all = get_all_labels(dataset)
+
+    if is_train:
+        train_idx, val_idx = next(sss.split(X=np.zeros(len(labels_all)), y=labels_all))
+        train_subset = torch.utils.data.Subset(dataset, train_idx)
+        val_subset = torch.utils.data.Subset(dataset, val_idx)
+
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+        X_meta_train, y_meta_train = build_meta_features(top_trials, train_loader, device)
+        X_meta_val, y_meta_val = build_meta_features(top_trials, val_loader, device)
+    else:
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        X_meta_train, y_meta_train = build_meta_features(top_trials, loader, device)
+        X_meta_val, y_meta_val = None, None
+
+    ensemble_model = StackingEnsemble(
+        base_models=None,
+        meta_model=LGBMClassifier(
+            n_estimators=20, learning_rate=0.1, num_leaves=3, max_depth=2,
+            random_state=42, verbosity=-1, class_weight='balanced'
+        ),
+        use_proba=True,
+        cls_count=class_counts
+    )
+    ensemble_model.fit_meta(X_meta_train, y_meta_train)
+
+    if is_train:
+        # 4️⃣ predict & f1-score 계산
+        y_pred = ensemble_model.meta_model.predict(X_meta_val)
+
+        f1_scores = []
+        for i in range(len(class_counts)):
+            pred_i = y_pred[:, i]
+            true_i = y_meta_val[:, i]
+            score = f1_score(true_i, pred_i, average='macro')
+            f1_scores.append(score)
+
+        avg_f1 = np.mean(f1_scores)
+        print(f"\n✅ F1 scores per task: {f1_scores}")
+        print(f"✅ Mean F1 score: {avg_f1:.4f}")
+
+    print("\n✅ Ensemble training complete")
+
+    return ensemble_model
+
+
+def ensemble_test(top_trials, ensemble_model, batch_size=32, num_workers=4):
+    device = 'cuda'
+    test_dataset = H5LifelogDataset(os.path.join("Img_Data", "test"))
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=True, drop_last=False,
+        persistent_workers=True, prefetch_factor=2
+    )
+
+    # 1️⃣ meta-feature 생성
+    X_meta_test, _ = build_meta_features(top_trials, test_loader, device)
+
+    # 2️⃣ prediction
+    y_pred = ensemble_model.meta_model.predict(X_meta_test)  # shape: (n_samples, n_tasks)
+
+    print(f"\n✅ Test prediction shape: {y_pred.shape}")
+
+    # 3️⃣ 반환 또는 파일 저장
+    return y_pred
+
 
 if __name__ == "__main__":
 
@@ -449,40 +782,33 @@ if __name__ == "__main__":
     from util.LifelogDataset import H5LifelogDataset
     from torch.utils.data import DataLoader
     import torch.nn as nn
+    import optuna
+    from util.StackingEnsemble import StackingEnsemble
+    from lightgbm import LGBMClassifier
 
-
-    h5_save_dir = "Img_Data"
-    train_or_test = {True: "train", False: "test"}
-    batch_size = 8
-    num_workers = 4
+    N = 10  # 상위 N개의 trial을 선택
     epochs = 50
-    lr = 1e-3
-    use_amp = True
+    batch_size = 32
+    trials = optuna.load_study(
+        study_name='moe_model_tuning',
+        storage='sqlite:////home/ubuntu/ETRI-/moe_model_tuning.db'
+    )
 
-    train_dataset = H5LifelogDataset(os.path.join(h5_save_dir, train_or_test[True]))
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    model = ETRIHumanUnderstandModel(base_block=EffNetTransformerEncoder)
-    optimizer = torch.optim.AdamW(get_param_groups(model, base_lr=5e-4, decay_rate=0.2))
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=4)
+    completed_trials = [t for t in trials.trials if t.state.name == "COMPLETE"]
+
+    # 2️⃣ value 기준으로 정렬 (내림차순: best가 먼저)
+    top_trials = sorted(completed_trials, key=lambda t: t.value, reverse=True)[:N]
+    print(f"\nTop {N} trials based on value: {[t.number for t in top_trials]}\n")
+
+    ensemble_model = ensemble_training(top_trials, batch_size=batch_size, epochs=epochs, num_workers=4)
+    # final_result = ensemble_test(top_trials, ensemble_model, batch_size=batch_size, num_workers=4)
 
 
-    dtype = torch.float16 if use_amp else torch.float32
-    class_weight_list = get_class_weights(labels=get_all_labels(train_dataset), ref_dtype=dtype, ref_device='cuda')
-    criterion_list = [nn.CrossEntropyLoss(label_smoothing=0.05, weight=class_weight_list[i]
-                                          ) for i in range(6)]
+    
 
 
-    train(model=model,
-          train_loader=train_loader,
-          num_epochs=epochs,
-          optimizer=optimizer,
-          criterion_list=criterion_list,
-          device='cuda',
-          log_wandb=False,
-          scheduler=scheduler,
-          )
 
             
 
 
-    
+     
